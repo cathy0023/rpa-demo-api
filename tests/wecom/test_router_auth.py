@@ -170,10 +170,23 @@ def test_missing_cookie_profile_401():
         assert resp.json()["detail"]["code"] != 2000, path
 
 
-def test_valid_cookie_profile_passes_guard():
-    """有效 cookie 过守卫,占位端点返回 501(T4/T7/T5 替换)"""
-    cfg = WecomConfig(corp_id=CORP_ID, app_secret=SECRET, cookie_secret=COOKIE_SECRET)
-    client = _build_app(cfg, _wecom_handler([]))
-    token = sign_session("zhangsan", secret=COOKIE_SECRET)
-    resp = client.get("/api/v1/wecom/sidebar/profile", cookies={wecom_router.SESSION_COOKIE: token})
-    assert resp.status_code == 501
+def test_valid_cookie_profile_passes_guard(tmp_path):
+    """有效 cookie 过守卫(T4 已实现 /profile:返回非 401 业务响应;占位端点仍 501)"""
+    import sqlite3
+
+    from app.wecom.contact import set_conn
+
+    c = sqlite3.connect(str(tmp_path / "test_guard.db"), check_same_thread=False)
+    c.row_factory = sqlite3.Row
+    set_conn(c)
+    try:
+        cfg = WecomConfig(corp_id=CORP_ID, app_secret=SECRET, cookie_secret=COOKIE_SECRET)
+        client = _build_app(cfg, _wecom_handler([]))
+        token = sign_session("zhangsan", secret=COOKIE_SECRET)
+        resp = client.get("/api/v1/wecom/sidebar/profile", cookies={wecom_router.SESSION_COOKIE: token})
+        assert resp.status_code != 401  # 守卫放行(T4 后为画像业务响应)
+        resp = client.get("/api/v1/wecom/sidebar/history", cookies={wecom_router.SESSION_COOKIE: token})
+        assert resp.status_code == 501  # /history 占位(T7 替换)
+    finally:
+        set_conn(None)
+        c.close()

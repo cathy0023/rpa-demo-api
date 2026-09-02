@@ -1,4 +1,4 @@
-"""企微侧边栏端点:/sign /login + 守卫占位(/profile /history /generate,T4/T7/T5 替换)。
+"""企微侧边栏端点:/sign /login /profile + 守卫占位(/history /generate,T7/T5 替换)。
 
 会话:POST /login 兑换 code 后签 HMAC cookie(httponly/samesite=lax/max_age=7200);
 除 /sign 外的端点经 get_current_staff 守卫(AC8:无/坏 cookie → HTTP 401 + 信封)。
@@ -18,6 +18,7 @@ from starlette.status import HTTP_501_NOT_IMPLEMENTED
 from ..schemas import ok
 from .auth import sign_session, verify_session
 from .config import WecomConfig, wecom_config
+from .contact import WecomContactError, get_contact_profile
 from .deps import SESSION_COOKIE, get_current_staff
 from .signature import jsapi_signature
 from .token import WecomApiError, WecomTokenClient
@@ -30,6 +31,8 @@ api_router = router
 
 _QYAPI_BASE = "https://qyapi.weixin.qq.com"
 _COOKIE_MAX_AGE_S = 7200  # 与 auth.DEFAULT_TTL_S 一致
+# 外部联系人不存在类错误码:84061 非外部联系人/无好友关系;84060 不合法外部联系人 userid
+_CONTACT_NOT_EXIST_CODES = {84060, 84061}
 
 # 运行时句柄(测试经 configure 注入;生产首次请求时按 wecom_config 惰性构建)
 _cfg: WecomConfig | None = None
@@ -139,10 +142,25 @@ def login(body: LoginBody, response: Response):
 
 
 @router.get("/profile")
-def profile(userid: str = Depends(get_current_staff)):
-    """占位:T4 替换为客户画像"""
-    raise HTTPException(status_code=HTTP_501_NOT_IMPLEMENTED,
-                        detail={"code": 5001, "message": "profile 未实现", "data": {"userid": userid}})
+def profile(userid: str, staff_userid: str = Depends(get_current_staff)):  # noqa: ARG001 - staff_userid 仅守卫会话
+    """外部联系人精简画像(缓存 TTL 600s,见 contact.get_contact_profile)。
+
+    userid=外部联系人 ID(前端 getCurExternalContact);staff_userid=会话守卫身份
+    """
+    cfg = _active_cfg()
+    try:
+        access_token = _client().get_access_token()
+    except WecomApiError as e:
+        logger.warning("profile 取 access_token 失败: %s", e)
+        return _err(4004, f"企微凭据获取失败: {e}")
+    try:
+        return ok(get_contact_profile(access_token, userid,
+                                      transport=_http_transport, corp_id=cfg.corp_id))
+    except WecomContactError as e:
+        logger.warning("profile 取画像失败: %s", e)
+        if e.errcode in _CONTACT_NOT_EXIST_CODES:
+            return _err(4101, f"外部联系人不存在或无好友关系: {userid} (errcode={e.errcode})")
+        return _err(4102, f"客户画像获取失败: {e}")
 
 
 @router.get("/history")
