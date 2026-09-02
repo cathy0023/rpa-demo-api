@@ -3,7 +3,7 @@ title: WECOM-001 企微侧边栏·智能销售话术助手
 id: WECOM-001
 created: 2026-09-02
 source: inbox/2026-09-02-wechat-sidebar-sales-assistant.md
-status: Draft
+status: Approved
 ---
 
 # WECOM-001 企微侧边栏·智能销售话术助手
@@ -47,10 +47,10 @@ status: Draft
 企微客户端(单聊侧边栏)                FastAPI(rpa-demo-api 扩展)
 ┌──────────────────┐   HTTPS    ┌─────────────────────────────────┐
 │ sidebar H5       │──────────→│ /wecom/sign        签名+票证      │
-│ wx.config        │           │ /wecom/profile     客户画像代理   │
-│ wx.agentConfig   │           │ /wecom/history     历史上下文     │
-│ getCurExternal   │           │ /wecom/generate    话术生成       │
-│ Contact          │           │                                 │
+│ wx.config        │           │ /wecom/login       身份兑换       │
+│ wx.agentConfig   │           │ /wecom/profile     客户画像代理   │
+│ login+getCur     │           │ /wecom/history     历史上下文     │
+│ ExternalContact  │           │ /wecom/generate    话术生成       │
 └──────────────────┘           │  msgaudit_sync (后台任务)         │
                                │  GetChatData→RSA→AES→SQLite     │
                                └───────────┬─────────────────────┘
@@ -66,13 +66,13 @@ status: Draft
 | `app/wecom/config.py` | 企微配置 | 继承 frozen dataclass 范式：`WECOM_CORP_ID` / `WECOM_APP_SECRET` / `WECOM_AGENT_ID` / `WECOM_SID_RSA_PRIVATE_KEY`（env 或文件路径）/ `WECOM_SID_ENABLED` 开关 |
 | `app/wecom/token.py` | access_token + 双 ticket 缓存 | 内存缓存 + 过期前 300s 主动刷新；企业 ticket 与应用 ticket 分开存 |
 | `app/wecom/signature.py` | 签名生成 | `sha1(jsapi_ticket=..&noncestr=..&timestamp=..&url=..)`，url 去除 # 后内容 |
-| `app/wecom/auth.py` | 员工身份兑换 | `POST /cgi-bin/auth/getuserinfo`：前端 `wx.qy.login` 的 code 兑换当前员工 userid，写入短期签名 cookie（HttpOnly，2h）作为后续请求身份锚点 |
+| `app/wecom/auth.py` | 员工身份兑换 | `POST /cgi-bin/auth/getuserinfo`：前端 `wx.qy.login` 的 code 兑换当前员工 userid，写入短期签名 cookie（HttpOnly，2h）作为后续请求身份锚点；cookie 签名密钥走独立环境变量 `WECOM_SID_COOKIE_SECRET` |
 | `app/wecom/contact.py` | 客户画像代理 | `GET /cgi-bin/externalcontact/get`，输出精简画像 dict（昵称/备注/公司/标签）；读写 `wecom_profile_cache`（TTL 10 分钟） |
-| `app/wecom/msgaudit.py` | 会话存档拉取+解密 | ctypes 封装官方 C SDK（可选用 pypi `wecom-audit`，锁定 fallback 为自封装）；`GetChatData(seq)` → RSA PKCS1 → AES-256-CBC；文本消息优先，媒体消息存元数据不下载 |
+| `app/wecom/msgaudit.py` | 会话存档拉取+解密 | 默认 ctypes 自封装官方 C SDK（备选 pypi `wecom-audit`，见决策 #1）；`GetChatData(seq)` → RSA PKCS1 → AES-256-CBC；文本消息优先，媒体消息存元数据不下载 |
 | `app/wecom/sync.py` | 同步后台任务 | asyncio task 秒级轮询（可配 `WECOM_SID_POLL_INTERVAL`），seq 持久化到 SQLite `sync_state` 表；单聊文本消息写入 `wecom_chat_history` 表；落库走 `asyncio.to_thread` 分批写入避免阻塞事件循环；单条解密失败跳过并告警日志，不中断轮询 |
 | `app/wecom/context.py` | 上下文组装 | 画像 dict + 最近 N 条聊天（`wecom_chat_history` 按 external_userid 倒序）拼成 LLM prompt 输入 |
 | `app/wecom/generate.py` | 话术生成 | 新建侧边栏专属 SYSTEM_PROMPT（输出 1 条 ≤200 字话术），复用 `llm.py` 的 httpx 调用与思维链兼容逻辑（提取共享函数，`llm.py` 原 RPA 路径行为不变） |
-| `app/wecom/router.py` | 路由 | 4 个端点（见下），挂载到 `api_router` |
+| `app/wecom/router.py` | 路由 | 5 个端点（见下），挂载到 `api_router` |
 
 ### API 设计
 
@@ -179,6 +179,7 @@ CREATE TABLE IF NOT EXISTS wecom_profile_cache (
 - **R1 会话存档开通状态未知（最大风险）**：需企业购买+合规审批。缓解：`WECOM_SID_ENABLED` 开关 + 降级路径（仅画像生成），未开通也不阻塞阶段 1/3。
 - **R2 C SDK 平台兼容**：开发机 macOS(arm64)、部署 Linux(x64)，二进制不同。缓解：SDK 路径可配置，单测不依赖真实 .so（mock SDK 层）。
 - **R3 可信域名需 ICP 备案**：开发联调靠 Whistle 代理绕过公网要求，但企微后台配置的域名仍需备案域名；若公司无现成备案域名需提前申请（外部依赖，跨阶段跟踪）。
+- **R4 SaaS 化演进**：MVP 数据模型已带 corp_id 维度、配置集中，代开发模式升级时凭证从环境变量变为按租户存储（超出本 RFC 范围）。
 - **R5 scenario/prompt 风格待产品拍板**：MVP 以自由文本 scenario + 通用销售话术 prompt 承接，正式意图分档与风格基调待销售团队/产品反馈后迭代（brainstorm 待解决问题 #4 的承接）。
 - **R4 SaaS 化演进**：MVP 数据模型已带 corp_id 维度、配置集中，代开发模式升级时凭证从环境变量变为按租户存储（超出本 RFC 范围）。
 
