@@ -15,6 +15,7 @@
 8. run_sync_loop:单次异常捕获记日志不中断;start_sync_task:降级开关与降级路径
 """
 import asyncio
+import ctypes
 import json
 import sqlite3
 import sys
@@ -290,6 +291,82 @@ def test_ctypes_client_empty_sdk_path_raises():
 def test_ctypes_client_bad_sdk_path_raises():
     with pytest.raises(MsgAuditError):
         CtypesChatArchiveClient(sdk_path="/nonexistent/libWeWorkFinanceSdk_C.so", corp_id="c", secret="s")
+
+
+# ---------- 7b. CtypesChatArchiveClient FreeData 内存释放 ----------
+
+class _FakeSdkFunc:
+    """可赋 argtypes/restype 的 fake 函数对象(模拟 ctypes 函数指针)"""
+
+    def __init__(self, fn):
+        self._fn = fn
+        self.argtypes = None
+        self.restype = None
+
+    def __call__(self, *args):
+        return self._fn(*args)
+
+
+class _FakeSdkLib:
+    """fake CDLL:模拟官方 SDK 入口,记录调用次数验证 FreeData 配对"""
+
+    def __init__(self, payload: bytes):
+        self.payload = payload
+        self.init_calls = 0
+        self.get_calls = 0
+        self.free_calls = 0
+        self.Init = _FakeSdkFunc(self._init)
+        self.GetChatData = _FakeSdkFunc(self._get)
+        self.Destroy = _FakeSdkFunc(self._destroy)
+        self.FreeData = _FakeSdkFunc(self._free)
+
+    def _init(self, corp_id, secret):
+        self.init_calls += 1
+        return 0x1234  # 非 0 句柄
+
+    def _get(self, sdk, seq, limit, proxy, passwd, timeout, out_ptr):
+        self.get_calls += 1
+        # out_ptr 是 byref(c_char_p) 包装;经 _obj 回写真实 c_char_p 字段
+        # (真实 SDK 内部写指针,单测以等价方式写入以便实现读取)
+        out_ptr._obj.value = self.payload
+        return 0
+
+    def _destroy(self, sdk):
+        return 0
+
+    def _free(self, sdk, ptr):
+        self.free_calls += 1
+        return 0
+
+
+def test_ctypes_client_frees_data_after_each_get(monkeypatch):
+    """FreeData 与 GetChatData 一一配对:每次成功拉取后必须释放 SDK 缓冲(防内存泄漏)"""
+    import json as _json
+
+    import app.wecom.msgaudit as ma
+
+    lib = _FakeSdkLib(_json.dumps({"chatdata": []}).encode("utf-8"))
+    monkeypatch.setattr(ma.ctypes, "CDLL", lambda path: lib)
+    client = ma.CtypesChatArchiveClient(sdk_path="/fake/sdk.so", corp_id="c", secret="s")
+    for _ in range(3):
+        assert client.get_chat_data(0, 10) == []
+    assert lib.get_calls == 3
+    assert lib.free_calls == 3  # 每次成功 GetChatData 后恰一次 FreeData
+    client.destroy()
+
+
+def test_ctypes_client_frees_data_even_when_parse_fails(monkeypatch):
+    """解析失败(JSON 非法)也必须 FreeData:释放逻辑在 finally,不因异常跳过"""
+    import app.wecom.msgaudit as ma
+
+    lib = _FakeSdkLib(b"not-json{")
+    monkeypatch.setattr(ma.ctypes, "CDLL", lambda path: lib)
+    client = ma.CtypesChatArchiveClient(sdk_path="/fake/sdk.so", corp_id="c", secret="s")
+    with pytest.raises(MsgAuditError):
+        client.get_chat_data(0, 10)
+    assert lib.get_calls == 1
+    assert lib.free_calls == 1
+    client.destroy()
 
 
 # ---------- 8. run_sync_loop / start_sync_task ----------

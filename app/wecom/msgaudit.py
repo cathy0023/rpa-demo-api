@@ -109,22 +109,32 @@ class CtypesChatArchiveClient:
         # int Destroy(void* sdk)
         self._lib.Destroy.argtypes = [ctypes.c_void_p]
         self._lib.Destroy.restype = ctypes.c_int
+        # void FreeData(void* sdk, char* msg_data) — 释放 GetChatData 返回的 SDK 内部缓冲
+        self._lib.FreeData.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+        self._lib.FreeData.restype = None
         self._handle = self._lib.Init(corp_id.encode("utf-8"), secret.encode("utf-8"))
         if not self._handle:
             raise MsgAuditError(f"会话存档 SDK Init 失败(corp_id={corp_id})")
         self._timeout_s = timeout_s
 
     def get_chat_data(self, seq: int, limit: int) -> list[dict]:
-        """拉取加密批并解析;非 0 返回码/空指针/非法 JSON 抛 MsgAuditError"""
+        """拉取加密批并解析;非 0 返回码/空指针/非法 JSON 抛 MsgAuditError。
+
+        GetChatData 返回的缓冲由 SDK 内部分配,用完必须 FreeData 归还,
+        否则每次轮询泄漏一块内存——释放放在 finally,解析失败也保证执行。
+        """
         out = ctypes.c_char_p()
         ret = self._lib.GetChatData(self._handle, seq, limit, None, None,
                                     self._timeout_s, ctypes.byref(out))
-        if ret != 0:
-            raise MsgAuditError(f"GetChatData 失败 ret={ret} seq={seq}")
-        raw_bytes = out.value  # SDK 内部分配的 JSON 串;官方另有 FreeData,本实现不持引用即可
-        if not raw_bytes:
-            raise MsgAuditError(f"GetChatData 返回空数据 seq={seq}")
-        return parse_chat_data(raw_bytes.decode("utf-8"))
+        try:
+            if ret != 0:
+                raise MsgAuditError(f"GetChatData 失败 ret={ret} seq={seq}")
+            raw_bytes = out.value
+            if not raw_bytes:
+                raise MsgAuditError(f"GetChatData 返回空数据 seq={seq}")
+            return parse_chat_data(raw_bytes.decode("utf-8"))
+        finally:
+            self._lib.FreeData(self._handle, out)
 
     def destroy(self) -> None:
         """释放 SDK 句柄(进程退出时调用;幂等)"""
