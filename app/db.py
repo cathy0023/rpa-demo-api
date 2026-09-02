@@ -2,12 +2,33 @@
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from .config import config
 
 _mutex = threading.Lock()
 _conn: sqlite3.Connection | None = None
+
+
+def write_lock() -> threading.Lock:
+    """进程级全局写锁(只读引用):wecom 各模块的 sqlite 写/读写复合操作共用,
+    避免多把锁交叉造成同一连接并发写(奇偶语句穿插/checkpoint 冲突)。
+    本模块既有写函数行为不变(同样持此锁)。"""
+    return _mutex
+
+
+@contextmanager
+def execute_write():
+    """写操作上下文:统一持全局写锁,退出自动提交;异常自动回滚。"""
+    with _mutex:
+        conn = _get_conn()
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
 
 
 def _get_conn() -> sqlite3.Connection:

@@ -8,6 +8,7 @@ import threading
 
 from .migrations import ensure_wecom_tables
 
+# 建表互斥(仅首次迁移用);数据写入统一走 db.write_lock 全局锁
 _MUTEX = threading.Lock()
 _conn: sqlite3.Connection | None = None  # 测试注入的独立连接;None 时走 db.py
 _db_migrated = False

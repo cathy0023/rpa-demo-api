@@ -95,7 +95,9 @@ def _read_cache(conn: sqlite3.Connection, corp_id: str, userid: str) -> dict | N
 
 
 def _write_cache(conn: sqlite3.Connection, corp_id: str, userid: str, profile: dict) -> None:
-    with _mutex:
+    from .. import db  # noqa: PLC0415 - 避免模块级循环导入
+
+    with db.write_lock():  # 全局统一写锁:与 sync/context 等模块的 sqlite 写互斥
         conn.execute(
             "INSERT INTO wecom_profile_cache (corp_id, external_userid, profile_json, updated_at) "
             "VALUES (?, ?, ?, ?) "

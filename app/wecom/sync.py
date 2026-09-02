@@ -30,14 +30,20 @@ logger = logging.getLogger(__name__)
 # 官方建议单批 ≤1000;demo 取 100(侧边栏历史默认查 20 条,100 足够且降低解密延迟)
 BATCH_LIMIT = 100
 
-_MUTEX = threading.Lock()
-
 
 def _get_conn() -> sqlite3.Connection:
     """复用 msgaudit 的连接源(测试注入连接优先,生产走 db.py 全局连接,建表幂等)"""
     from .msgaudit import _get_conn as msgaudit_conn  # noqa: PLC0415 - 避免模块级循环导入
 
     return msgaudit_conn()
+
+
+def _write_lock() -> threading.Lock:
+    """全局统一写锁(db.write_lock):与 contact/context/msgaudit 的写操作互斥,
+    避免多把锁各自持有时同一连接并发写。测试注入的独立连接同样受此锁保护。"""
+    from .. import db  # noqa: PLC0415 - 避免模块级循环导入
+
+    return db.write_lock()
 
 
 def _read_last_seq(conn: sqlite3.Connection, corp_id: str) -> int:
@@ -79,7 +85,7 @@ def _persist_msg(conn: sqlite3.Connection, corp_id: str, external: str,
                  sender: str, content: str, msg_ts: int, seq: int) -> int:
     """INSERT OR IGNORE 幂等落库(seq UNIQUE),返回实际落库条数(0/1)"""
     from_role = "customer" if sender == external else "staff"
-    with _MUTEX:
+    with _write_lock():
         cur = conn.execute(
             "INSERT OR IGNORE INTO wecom_chat_history "
             "(corp_id, external_userid, sender_userid, from_role, content, msg_ts, seq) "
@@ -92,7 +98,7 @@ def _persist_msg(conn: sqlite3.Connection, corp_id: str, external: str,
 
 def _advance_seq(conn: sqlite3.Connection, corp_id: str, last_seq: int) -> None:
     """游标推进写回 sync_state(UPSERT,持久化支撑重启续传)"""
-    with _MUTEX:
+    with _write_lock():
         conn.execute(
             "INSERT INTO sync_state (corp_id, last_seq, updated_at) VALUES (?, ?, ?) "
             "ON CONFLICT(corp_id) DO UPDATE SET last_seq=excluded.last_seq, "

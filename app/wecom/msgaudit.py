@@ -189,6 +189,7 @@ def decrypt_msg(private_key_pem: bytes, encrypt_random_key: str, encrypt_chat_ms
     return decrypt_chat_msg(encrypt_chat_msg, secret_key)
 
 
+# 建表互斥(仅首次迁移用);数据写入统一走 db.write_lock 全局锁
 _mutex = threading.Lock()
 _conn: sqlite3.Connection | None = None  # 测试注入的独立连接;None 时走 db.py
 _db_migrated = False
@@ -218,19 +219,27 @@ def _get_conn() -> sqlite3.Connection:
     return conn
 
 
-def get_history_records(external_userid: str, limit: int = 20) -> list[dict]:
+def get_history_records(external_userid: str, limit: int = 20, corp_id: str = "") -> list[dict]:
     """查某外部联系人最近 limit 条消息,新在前 [{role, content, ts}]。
 
     sender==external_userid → customer(客户发的),否则 staff(企微销售发的)。
+    corp_id 非空时仅查该企业的消息(多企业隔离);为空不过滤(测试/单企业兼容)。
     表不可查时返回 [](降级,同 context.get_recent_history 范式)。
     """
     try:
         conn = _get_conn()
-        rows = conn.execute(
-            "SELECT sender_userid, content, msg_ts FROM wecom_chat_history "
-            "WHERE external_userid=? ORDER BY seq DESC LIMIT ?",
-            (external_userid, limit),
-        ).fetchall()
+        if corp_id:
+            rows = conn.execute(
+                "SELECT sender_userid, content, msg_ts FROM wecom_chat_history "
+                "WHERE external_userid=? AND corp_id=? ORDER BY seq DESC LIMIT ?",
+                (external_userid, corp_id, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT sender_userid, content, msg_ts FROM wecom_chat_history "
+                "WHERE external_userid=? ORDER BY seq DESC LIMIT ?",
+                (external_userid, limit),
+            ).fetchall()
     except sqlite3.OperationalError:
         return []
     return [
