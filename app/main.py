@@ -6,6 +6,7 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager, suppress
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -70,6 +71,27 @@ app.add_middleware(
 )
 
 app.include_router(api_router)
+
+
+def mount_frontend_dist(app: FastAPI, dist_dir: str | Path = "dist") -> bool:
+    """同源部署:./dist 存在时挂载 StaticFiles(html=True)托管前端构建产物。
+
+    - 必须在 include_router 之后调用:FastAPI 按注册顺序匹配,API 前缀命中优先,
+      静态兜底其余路径(已用 TestClient 验证 /api/v1/... 与 /sidebar.html 同时可达)
+    - dist 不存在跳过(本地 dev 走 vite,不受影响)
+    返回是否实际挂载。
+    """
+    from starlette.staticfiles import StaticFiles
+
+    root = Path(dist_dir)
+    if not root.is_dir():
+        logging.getLogger(__name__).info("未发现前端构建目录 %s,跳过静态托管(本地 dev 模式)", root)
+        return False
+    app.mount("/", StaticFiles(directory=str(root), html=True), name="frontend")
+    return True
+
+
+mount_frontend_dist(app, "dist")
 
 
 # 401 统一信封(app 级 handler,非 APIRouter):WecomAuthError → 顶层 code!=2000 信封,
