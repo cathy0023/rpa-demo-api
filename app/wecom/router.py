@@ -1,7 +1,8 @@
-"""企微侧边栏端点:/sign /login /profile + 守卫占位(/history /generate,T7/T5 替换)。
+"""企微侧边栏端点:/sign /login /profile /history /generate。
 
 会话:POST /login 兑换 code 后签 HMAC cookie(httponly/samesite=lax/max_age=7200);
 除 /sign 外的端点经 get_current_staff 守卫(AC8:无/坏 cookie → HTTP 401 + 信封)。
+/history 受 WECOM_SID_ENABLED 降级开关控制(false → data:[],AC6)。
 测试注入:configure(cfg=..., token_client_factory=...);生产用全局 wecom_config 惰性单例。
 """
 import asyncio
@@ -11,10 +12,9 @@ import time
 from urllib.parse import urlparse
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from starlette.status import HTTP_501_NOT_IMPLEMENTED
 
 from ..schemas import ok
 from .auth import sign_session, verify_session
@@ -24,6 +24,7 @@ from .context import get_recent_history
 from .deps import SESSION_COOKIE, get_current_staff
 from .generate import generate_script
 from .llm_shared import LlmError
+from .msgaudit import get_history_records
 from .signature import jsapi_signature
 from .token import WecomApiError, WecomTokenClient
 
@@ -175,10 +176,16 @@ def profile(userid: str, staff_userid: str = Depends(get_current_staff)):  # noq
 
 
 @router.get("/history")
-def history(userid: str = Depends(get_current_staff)):
-    """占位:T7 替换为会话历史"""
-    raise HTTPException(status_code=HTTP_501_NOT_IMPLEMENTED,
-                        detail={"code": 5001, "message": "history 未实现", "data": {"userid": userid}})
+def history(userid: str, limit: int = 20, staff_userid: str = Depends(get_current_staff)):  # noqa: ARG001 - staff_userid 仅守卫会话
+    """会话历史:WECOM_SID_ENABLED=false 降级返回 data:[](AC6);true 查落库消息。
+
+    userid=外部联系人 ID(前端 getCurExternalContact);staff_userid=会话守卫身份;
+    返回最近 limit 条(默认 20,新在前) [{role: customer|staff, content, ts}]
+    """
+    cfg = _active_cfg()
+    if not cfg.sid_enabled:
+        return ok([])
+    return ok(get_history_records(userid, limit=limit))
 
 
 class GenerateBody(BaseModel):

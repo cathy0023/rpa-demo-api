@@ -185,8 +185,10 @@ def test_valid_cookie_profile_passes_guard(tmp_path):
         token = sign_session("zhangsan", secret=COOKIE_SECRET)
         resp = client.get("/api/v1/wecom/sidebar/profile", cookies={wecom_router.SESSION_COOKIE: token})
         assert resp.status_code != 401  # 守卫放行(T4 后为画像业务响应)
-        resp = client.get("/api/v1/wecom/sidebar/history", cookies={wecom_router.SESSION_COOKIE: token})
-        assert resp.status_code == 501  # /history 占位(T7 替换)
+        resp = client.get("/api/v1/wecom/sidebar/history", params={"userid": "cust_1"},
+                          cookies={wecom_router.SESSION_COOKIE: token})
+        assert resp.status_code == 200  # /history T7 已实现:sid_enabled 默认 false → 降级空数组
+        assert resp.json() == {"code": 2000, "message": "OK", "data": []}
     finally:
         set_conn(None)
         c.close()
