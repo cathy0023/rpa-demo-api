@@ -60,6 +60,8 @@ def _llm_handler(calls: list[httpx.Request], content: str = "张总您好,为您
 
 def _build_app(cfg: WecomConfig, handler) -> TestClient:
     app = FastAPI()
+    from app.wecom.deps import WecomAuthError as _WAE, wecom_auth_error_response as _waer
+    app.add_exception_handler(_WAE, lambda r, e: _waer(e))
     app.include_router(wecom_router.api_router)
     transport = httpx.MockTransport(handler)
     wecom_router.configure(
@@ -94,6 +96,8 @@ def test_generate_with_valid_cookie_returns_script(conn, monkeypatch):
     llm_transport = httpx.MockTransport(_llm_handler(llm_calls))
     wecom_cfg = WecomConfig(corp_id=CORP_ID, app_secret=SECRET, cookie_secret=COOKIE_SECRET)
     app = FastAPI()
+    from app.wecom.deps import WecomAuthError as _WAE, wecom_auth_error_response as _waer
+    app.add_exception_handler(_WAE, lambda r, e: _waer(e))
     app.include_router(wecom_router.api_router)
     wecom_router.configure(
         cfg=wecom_cfg,
@@ -122,7 +126,7 @@ def test_generate_without_cookie_401(conn):
     client = _build_app(wecom_cfg, _wecom_handler([]))
     resp = client.post("/api/v1/wecom/sidebar/generate", json={"userid": "wo_customer1"})
     assert resp.status_code == 401
-    assert resp.json()["detail"]["code"] != 2000
+    assert resp.json()["code"] == 4001  # 顶层统一信封
 
 
 def test_generate_invalid_cookie_401(conn):
@@ -141,6 +145,8 @@ def test_generate_llm_key_missing_clear_error(conn, monkeypatch):
     wecom_cfg = WecomConfig(corp_id=CORP_ID, app_secret=SECRET, cookie_secret=COOKIE_SECRET)
     wecom_transport = httpx.MockTransport(_wecom_handler(wecom_calls))
     app = FastAPI()
+    from app.wecom.deps import WecomAuthError as _WAE, wecom_auth_error_response as _waer
+    app.add_exception_handler(_WAE, lambda r, e: _waer(e))
     app.include_router(wecom_router.api_router)
     wecom_router.configure(
         cfg=wecom_cfg,

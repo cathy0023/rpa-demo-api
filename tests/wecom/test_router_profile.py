@@ -54,6 +54,8 @@ def _wecom_handler(calls: list[httpx.Request], contact_json: dict):
 
 def _build_app(cfg: WecomConfig, handler) -> TestClient:
     app = FastAPI()
+    from app.wecom.deps import WecomAuthError as _WAE, wecom_auth_error_response as _waer
+    app.add_exception_handler(_WAE, lambda r, e: _waer(e))
     app.include_router(wecom_router.api_router)
     transport = httpx.MockTransport(handler)
     wecom_router.configure(

@@ -62,6 +62,8 @@ def _envelope(seq: int, msg: dict) -> dict:
 
 def _build_client(cfg: WecomConfig) -> TestClient:
     app = FastAPI()
+    from app.wecom.deps import WecomAuthError as _WAE, wecom_auth_error_response as _waer
+    app.add_exception_handler(_WAE, lambda r, e: _waer(e))
     app.include_router(wecom_router.api_router)
     transport = httpx.MockTransport(lambda req: httpx.Response(
         200, json={"errcode": 0, "access_token": "AT-1", "expires_in": 7200}))

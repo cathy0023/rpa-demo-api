@@ -1,10 +1,11 @@
-"""FastAPI 会话守卫依赖:读签名 cookie,verify 失败抛 HTTP 401(统一信封体)。
+"""FastAPI 会话守卫依赖:读签名 cookie,verify 失败抛 WecomAuthError(401 统一信封)。
 
 fail-closed:cookie_secret 为空/弱密钥时一律 401,不给伪造会话任何机会
 (空串 HMAC 仍可运算——攻击者知道密钥为空即可自签合法签名)。
+信封:WecomAuthError 经 app 级 exception_handler 转为 HTTP 401 + 顶层
+{"code":4001, "message":..., "data":None},不再包 detail。
 """
-from fastapi import Cookie, HTTPException
-from starlette.status import HTTP_401_UNAUTHORIZED
+from fastapi import Cookie
 
 from .auth import verify_session
 from .config import validate_cookie_secret
@@ -13,11 +14,32 @@ from .config import validate_cookie_secret
 SESSION_COOKIE = "wecom_sid"
 
 
-def _401() -> HTTPException:
-    return HTTPException(
+class WecomAuthError(Exception):
+    """会话无效/缺失/过期/服务端密钥不合规;由 app 级 handler 统一转 401 信封"""
+
+    def __init__(self, code: int = 4001, message: str = "会话无效或已过期") -> None:
+        self.code = code
+        self.message = message
+        super().__init__(message)
+
+
+def wecom_auth_error_response(exc: "WecomAuthError") -> "JSONResponse":
+    """WecomAuthError → HTTP 401 + 顶层 {"code","message","data"} 信封。
+
+    供 app 级 add_exception_handler 注册(main.py);测试构建的最小 app 也必须注册,
+    否则守卫端点的 401 会以未处理异常冒出。
+    """
+    from fastapi.responses import JSONResponse  # noqa: PLC0415
+    from starlette.status import HTTP_401_UNAUTHORIZED
+
+    return JSONResponse(
         status_code=HTTP_401_UNAUTHORIZED,
-        detail={"code": 4001, "message": "未登录或会话已过期", "data": None},
+        content={"code": exc.code, "message": exc.message, "data": None},
     )
+
+
+def _401() -> WecomAuthError:
+    return WecomAuthError()
 
 
 def get_current_staff(wecom_sid: str | None = Cookie(None, alias=SESSION_COOKIE)) -> str:

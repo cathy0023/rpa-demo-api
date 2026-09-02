@@ -7,8 +7,10 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager, suppress
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from starlette.status import HTTP_401_UNAUTHORIZED
 
 from .config import config
 from .routers import api_router
@@ -68,6 +70,16 @@ app.add_middleware(
 )
 
 app.include_router(api_router)
+
+
+# 401 统一信封(app 级 handler,非 APIRouter):WecomAuthError → 顶层 code!=2000 信封,
+# 与业务错误 {"code", "message", "data"} 结构一致,前端不再区分 detail 包裹
+from .wecom.deps import WecomAuthError, wecom_auth_error_response
+
+
+@app.exception_handler(WecomAuthError)
+async def wecom_auth_error_handler(request: Request, exc: WecomAuthError) -> JSONResponse:
+    return wecom_auth_error_response(exc)
 
 
 @app.get("/healthz")

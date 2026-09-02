@@ -31,6 +31,9 @@ def _build_client(cfg: WecomConfig) -> TestClient:
     from fastapi import FastAPI
 
     fast_app = FastAPI()
+    from app.wecom.deps import WecomAuthError, wecom_auth_error_response
+
+    fast_app.add_exception_handler(WecomAuthError, lambda r, e: wecom_auth_error_response(e))
     fast_app.include_router(wecom_router.api_router)
     transport = httpx.MockTransport(lambda req: httpx.Response(
         200, json={"errcode": 0, "access_token": "AT-1", "expires_in": 7200}))

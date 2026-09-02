@@ -67,6 +67,11 @@ def _build_app(cfg: WecomConfig, handler) -> TestClient:
     from fastapi import FastAPI
 
     app = FastAPI()
+
+    from app.wecom.deps import WecomAuthError as _WAE, wecom_auth_error_response as _waer
+
+    app.add_exception_handler(_WAE, lambda r, e: _waer(e))
+
     app.include_router(wecom_router.api_router)
     transport = httpx.MockTransport(handler)
     wecom_router.configure(
@@ -157,13 +162,16 @@ def test_login_missing_userid_rejected():
 
 
 def test_invalid_cookie_profile_401():
-    """无效 cookie 访问守卫端点 → HTTP 401 + code!=2000 信封"""
+    """无效 cookie 访问守卫端点 → HTTP 401 + 顶层统一信封(不再包 detail)"""
     cfg = WecomConfig(corp_id=CORP_ID, app_secret=SECRET, cookie_secret=COOKIE_SECRET)
     client = _build_app(cfg, _wecom_handler([]))
     resp = client.get("/api/v1/wecom/sidebar/profile", cookies={wecom_router.SESSION_COOKIE: "forged.token"})
     assert resp.status_code == 401
-    # HTTPException(401, detail=统一信封) → body["detail"] 为信封结构
-    assert resp.json()["detail"]["code"] != 2000
+    body = resp.json()
+    assert body["code"] == 4001
+    assert body["message"]
+    assert body["data"] is None
+    assert "detail" not in body  # 顶层信封,不经 detail 包裹
 
 
 def test_missing_cookie_profile_401():
@@ -172,7 +180,7 @@ def test_missing_cookie_profile_401():
     for path, method in (("/profile", "get"), ("/history", "get"), ("/generate", "post")):
         resp = getattr(client, method)(f"/api/v1/wecom/sidebar{path}")
         assert resp.status_code == 401, path
-        assert resp.json()["detail"]["code"] != 2000, path
+        assert resp.json()["code"] == 4001, path
 
 
 def test_valid_cookie_profile_passes_guard(tmp_path):

@@ -172,8 +172,11 @@ def test_history_degraded_empty(wired):
 
 
 def test_generate_without_cookie_401(wired):
-    """AC8:无 cookie POST /generate → HTTP 401 + 信封 code!=2000"""
+    """AC8:无 cookie POST /generate → HTTP 401 + 顶层统一信封(code==4001)"""
     with TestClient(main_app) as client:
         resp = client.post("/api/v1/wecom/sidebar/generate", json={"userid": EXTERNAL_USERID})
     assert resp.status_code == 401
-    assert resp.json()["detail"]["code"] != 2000
+    body = resp.json()
+    assert body["code"] == 4001
+    assert body["data"] is None
+    assert "detail" not in body
