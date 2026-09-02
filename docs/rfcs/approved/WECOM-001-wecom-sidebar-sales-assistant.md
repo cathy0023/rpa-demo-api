@@ -201,6 +201,11 @@ CREATE TABLE IF NOT EXISTS wecom_profile_cache (
 - **会话存档解密失败**（RSA 密钥配置错误/轮换）：单条跳过 + 告警日志，轮询不中断；连续失败率超阈值时日志升级为 ERROR 提示人工介入。
 - **同事间会话数据**：GetChatData 返回全企业流，仅落库 `from_role` 可判定且对端为 external_userid（外部联系人）的单聊消息，内部单聊不入库。
 
+### Known Issues (MVP 裁剪)
+
+- **媒体消息不落元数据直接跳过**：同步链路仅落库文本消息（msgtype=text），图片/文件/语音等直接跳过不推进内容——RFC 决策#1 中「非文本消息的元数据落库」部分延后，待展示层需求出现再做。
+- **前缀启发式判定内外部有误判风险**：外部联系人 userid 以 wo/wm/wp 开头属企微默认分配规则，企业自定义 userid 的场景可能误判；已用「roomid 空 + 对端恰 1」的单聊判据收敛缓解（群聊与群发一律不入库），但不能完全消除，多企业/自定义 userid 场景需在 SaaS 阶段引入显式联系人关系表。
+
 ### 调研来源
 
 - [聊天工具栏接口-官方](https://developer.work.weixin.qq.com/document/path/91789) / [getCurExternalContact-官方](https://developer.work.weixin.qq.com/document/path/93592) / [获取会话内容-官方](https://developer.work.weixin.qq.com/document/path/91774) / [JS-SDK 开始使用-官方](https://developer.work.weixin.qq.com/document/path/90514) / [签名算法-官方](https://developer.work.weixin.qq.com/document/path/90506) / [常见错误排查-官方](https://developer.work.weixin.qq.com/document/path/90542) / [调试模式-官方](https://developer.work.weixin.qq.com/document/path/90315)

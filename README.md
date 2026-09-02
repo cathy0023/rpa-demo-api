@@ -93,3 +93,9 @@ pnpm dev
 ```
 
 降级开关：`WECOM_SID_ENABLED=false`（或缺省）→ 同步任务不启动、`/history` 返回空数组，画像/生成不受影响；`true` 但缺 SDK 或私钥 → 同步任务降级为 Disabled 并记日志，不阻断应用启动。
+
+### 五、同源部署与 Cookie 安全
+
+- **同源部署**：把前端构建产物放到后端工作目录 `./dist`（如 `sidebar.html`），启动时自动挂载 StaticFiles 托管（API 路径优先命中，`/sidebar.html` 等静态路径兜底）；`./dist` 不存在则跳过，本地 dev 走 vite 不受影响。
+- **Cookie Secure**：生产 HTTPS 部署设 `WECOM_SID_COOKIE_SECURE=true`，会话 cookie 仅经 HTTPS 传输（默认 false，本地 http 联调用）。
+- **Cookie Secret 强制**：`WECOM_CORP_ID` 非空（要用侧边栏）时，`WECOM_SID_COOKIE_SECRET` 必须配置且长度 ≥16，否则启动直接失败（RuntimeError）；运行期该密钥不合规时所有会话一律 401（fail-closed，防伪造）。`WECOM_CORP_ID` 为空（纯 RPA 用法）不受影响。

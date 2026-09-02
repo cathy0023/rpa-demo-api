@@ -108,21 +108,29 @@ def _advance_seq(conn: sqlite3.Connection, corp_id: str, last_seq: int) -> None:
         conn.commit()
 
 
+def _normalize_msgtime(raw: int) -> int:
+    """msgtime 归一为秒:官方毫秒(>10^12)→ //1000;秒原样返回(测试向量兼容)"""
+    return raw // 1000 if raw > 10**12 else raw
+
+
 def sync_once(client: ChatArchiveClient, private_key_pem: bytes, corp_id: str) -> int:
     """单轮同步:解密落库并推进游标,返回本轮实际落库条数。
 
     幂等性双保险:客户端按游标增量拉取(respect_seq)+ DB 层 seq UNIQUE OR IGNORE;
-    单条解密/解析失败跳过记日志不中断(坏密文只损失该条)。
+    单条解密/解析失败跳过记日志不中断(坏密文只损失该条);
+    连续失败计数 ≥50 汇总打一条 ERROR 后重置(防坏私钥场景日志刷屏)。
     """
     conn = _get_conn()
     start_seq = _read_last_seq(conn, corp_id)
     batch = client.get_chat_data(start_seq, BATCH_LIMIT)
     inserted = 0
     last_seq = start_seq
+    consecutive_failures = 0
     for item in batch:
         try:
             seq = int(item["seq"])
             msg = decrypt_msg(private_key_pem, item["encrypt_random_key"], item["encrypt_chat_msg"])
+            consecutive_failures = 0  # 本条成功,清零连续失败计数
             if msg.get("msgtype") != "text":  # 非文本(图片/文件/语音…)暂不落库
                 last_seq = max(last_seq, seq)
                 continue
@@ -136,11 +144,18 @@ def sync_once(client: ChatArchiveClient, private_key_pem: bytes, corp_id: str) -
             if not content:
                 logger.warning("sync 跳过缺 content 的文本消息 seq=%s", seq)
             else:
+                msg_ts = _normalize_msgtime(int(msg.get("msgtime", 0)))
                 inserted += _persist_msg(conn, corp_id, external, sender,
-                                         str(content), int(msg.get("msgtime", 0)), seq)
+                                         str(content), msg_ts, seq)
             last_seq = max(last_seq, seq)
         except (MsgAuditError, KeyError, ValueError, TypeError) as e:
-            logger.error("sync 单条消息处理失败 seq=%s 跳过: %s", item.get("seq"), e)
+            consecutive_failures += 1
+            if consecutive_failures >= 50:
+                logger.error("sync 连续失败 %d 条(疑似私钥错误/批量坏数据),人工介入排查;计数已重置",
+                             consecutive_failures)
+                consecutive_failures = 0
+            else:
+                logger.error("sync 单条消息处理失败 seq=%s 跳过: %s", item.get("seq"), e)
     _advance_seq(conn, corp_id, last_seq)
     if inserted:
         logger.info("sync corp_id=%s 本轮落库 %d 条(游标 %d→%d)", corp_id, inserted,

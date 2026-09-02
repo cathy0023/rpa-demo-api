@@ -149,6 +149,7 @@ def login(body: LoginBody, response: Response):
         max_age=_COOKIE_MAX_AGE_S,
         httponly=True,
         samesite="lax",
+        secure=cfg.cookie_secure,  # WECOM_SID_COOKIE_SECURE=true 时仅 HTTPS 传输(生产建议开)
     )
     return ok({"userid": userid})
 
@@ -180,12 +181,14 @@ def history(userid: str, limit: int = 20, staff_userid: str = Depends(get_curren
     """会话历史:WECOM_SID_ENABLED=false 降级返回 data:[](AC6);true 查落库消息。
 
     userid=外部联系人 ID(前端 getCurExternalContact);staff_userid=会话守卫身份;
-    返回最近 limit 条(默认 20,新在前) [{role: customer|staff, content, ts}]
+    返回最近 limit 条(默认 20,新在前) [{role: customer|staff, content, ts}];
+    limit 夹取到 [1,100](负数/超大值安全化,防全表扫描)。
     """
     cfg = _active_cfg()
     if not cfg.sid_enabled:
         return ok([])
-    return ok(get_history_records(userid, limit=limit))
+    limit = max(1, min(limit, 100))
+    return ok(get_history_records(userid, limit=limit, corp_id=cfg.corp_id))
 
 
 class GenerateBody(BaseModel):
@@ -215,7 +218,7 @@ def generate(body: GenerateBody, staff_userid: str = Depends(get_current_staff))
         if e.errcode in _CONTACT_NOT_EXIST_CODES:
             return _err(4101, f"外部联系人不存在或无好友关系: {body.userid} (errcode={e.errcode})")
         return _err(4102, f"客户画像获取失败: {e}")
-    history = get_recent_history(body.userid, limit=20)
+    history = get_recent_history(body.userid, limit=20, corp_id=cfg.corp_id)
     try:
         script = asyncio.run(generate_script(
             profile, history, body.scenario, body.exclude, transport=_llm_transport))

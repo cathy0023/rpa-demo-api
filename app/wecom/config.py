@@ -20,6 +20,7 @@ class WecomConfig:
     # --- 侧边栏安全 ---
     trusted_domain: str = field(default_factory=lambda: os.getenv("WECOM_SID_TRUSTED_DOMAIN", ""))
     cookie_secret: str = field(default_factory=lambda: os.getenv("WECOM_SID_COOKIE_SECRET", ""))
+    cookie_secure: bool = field(default_factory=lambda: _env_bool("WECOM_SID_COOKIE_SECURE", "false"))
     sid_enabled: bool = field(default_factory=lambda: _env_bool("WECOM_SID_ENABLED", "false"))
 
     # --- 会话存档同步 ---
