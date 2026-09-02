@@ -16,12 +16,31 @@ logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
 
+def ensure_wecom_cookie_secret(wecom_cfg) -> None:
+    """侧边栏启用时校验会话签名密钥;不合规直接拒绝启动(fail-fast)。
+
+    corp_id 非空 = 要用企微侧边栏,空/弱 cookie_secret 可被伪造会话 → RuntimeError;
+    corp_id 为空 = 纯 RPA 用法,不依赖侧边栏,不阻塞。
+    """
+    from .wecom.config import validate_cookie_secret
+
+    if not wecom_cfg.corp_id:
+        return
+    err = validate_cookie_secret(wecom_cfg)
+    if err:
+        raise RuntimeError(err)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     missing = config.validate()
     if missing:
         logging.getLogger(__name__).warning(
             "缺少配置: %s —— 出站发送与回调验签将失败", ", ".join(missing))
+    # 企微侧边栏会话密钥启动校验(corp_id 为空的纯 RPA 用法不阻塞)
+    from .wecom.config import wecom_config
+
+    ensure_wecom_cookie_secret(wecom_config)
     # 企微会话存档后台同步(WECOM_SID_ENABLED=false 时不启动,内部降级不抛)
     from .wecom.sync import start_sync_task
 

@@ -28,3 +28,18 @@ class WecomConfig:
 
 
 wecom_config = WecomConfig()
+
+
+def validate_cookie_secret(cfg: "WecomConfig") -> str | None:
+    """校验会话签名密钥:空或长度 <16 返回错误说明,合法返回 None。
+
+    空串密钥可被任何人自签 cookie 伪造会话,必须 fail-closed;16 为 HMAC 密钥的
+    最低强度下限(demo 从宽,生产建议 ≥32 字节随机串)。
+    """
+    secret = cfg.cookie_secret
+    if not secret or len(secret) < 16:
+        return (
+            "WECOM_SID_COOKIE_SECRET 未配置或长度不足 16 字符——空/弱密钥下会话 cookie 可被伪造,"
+            "请配置 ≥16 字符随机串"
+        )
+    return None
