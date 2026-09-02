@@ -6,11 +6,13 @@
   AES key = sha256(secret_key),iv = key[:16]
 - 解密失败/非法消息体统一抛 MsgAuditError,由调用方决定单条跳过(T8)
 
-SDK(ctypes 拉取加密批)留 TODO 由 T8 补;本任务仅提供 ChatArchiveClient Protocol
-与 DisabledChatArchiveClient 降级实现(WECOM_SID_ENABLED=false 语义)。
+SDK 拉取:T8 提供 CtypesChatArchiveClient(CDLL 加载 libWeWorkFinanceSdk_C,
+Init/GetChatData/Destroy 三函数,密码/代理传 None)、FakeChatArchiveClient(测试/演示回放
+加密批)与 DisabledChatArchiveClient 降级实现(WECOM_SID_ENABLED=false 语义)。
 另含 /history 用的已落库消息查询(get_history_records,连接范式同 contact.py)。
 """
 import base64
+import ctypes
 import hashlib
 import json
 import sqlite3
@@ -25,18 +27,18 @@ from .migrations import ensure_wecom_tables
 
 
 class MsgAuditError(Exception):
-    """会话存档解密/解析失败(错误私钥、错误 secret_key、非法消息体)"""
-
-
-# TODO(T8): ctypes 拉取实现——Init/GetChatData/Destroy(SDK .so 路径 cfg.sdk_path 可配,
-# import/加载失败时降级 DisabledChatArchiveClient),与 sync.py 轮询任务配套。
+    """会话存档解密/解析失败(错误私钥、错误 secret_key、非法消息体、SDK 加载失败)"""
 
 
 class ChatArchiveClient(Protocol):
-    """会话存档拉取接口:T8 ctypes 实现与测试 mock 共同遵循"""
+    """会话存档拉取接口:ctypes 实现、Fake 实现与测试 mock 共同遵循"""
 
     def get_chat_data(self, seq: int, limit: int) -> list[dict]:
-        """拉取 seq 之后的加密消息批,至多 limit 条,新消息 seq 递增"""
+        """拉取 seq 之后的加密消息批,至多 limit 条,新消息 seq 递增
+
+        返回条目与官方 GetChatData 的 chatdata 同构:
+        {seq, msgid, publickey_ver, encrypt_random_key, encrypt_chat_msg}
+        """
         ...
 
 
@@ -45,6 +47,90 @@ class DisabledChatArchiveClient:
 
     def get_chat_data(self, seq: int, limit: int) -> list[dict]:
         return []
+
+
+def parse_chat_data(raw_json: str) -> list[dict]:
+    """解析 GetChatData 返回的 JSON 串,取 chatdata 数组(结构非法抛 MsgAuditError)"""
+    try:
+        data = json.loads(raw_json)
+    except json.JSONDecodeError as e:
+        raise MsgAuditError(f"GetChatData 返回非法 JSON: {e}") from e
+    if not isinstance(data, dict) or not isinstance(data.get("chatdata"), list):
+        raise MsgAuditError("GetChatData 返回缺少 chatdata 数组")
+    return data["chatdata"]
+
+
+class FakeChatArchiveClient:
+    """测试/演示用:直接回放预先构造好的加密消息批。
+
+    respect_seq=True(默认)时按起点 seq 过滤(模拟 SDK 游标语义);
+    置 False 无视游标重复吐全量,用于验证 DB 层幂等。
+    """
+
+    def __init__(self, items: list[dict], respect_seq: bool = True):
+        self.items = list(items)
+        self.respect_seq = respect_seq
+        self.calls: list[tuple[int, int]] = []
+
+    def get_chat_data(self, seq: int, limit: int) -> list[dict]:
+        self.calls.append((seq, limit))
+        matched = [item for item in self.items if not self.respect_seq or item["seq"] > seq]
+        return matched[:limit]
+
+
+class CtypesChatArchiveClient:
+    """官方 C SDK 拉取实现:CDLL 加载 libWeWorkFinanceSdk_C 后 Init/GetChatData/Destroy。
+
+    - Init(corp_id, secret) 返回 SDK 句柄;密码(_rsa_private_key 密码)与代理官方允许传 None
+    - GetChatData(seq, limit, proxy, passwd, timeout) 返回 JSON 串,解析后取 chatdata 数组
+    - SDK 路径由 cfg.sdk_path 配置;load 失败/Init 失败抛 MsgAuditError,由调用方(sync)
+      降级为 DisabledChatArchiveClient,不阻断应用启动
+    """
+
+    def __init__(self, sdk_path: str, corp_id: str, secret: str, timeout_s: int = 30):
+        if not sdk_path:
+            raise MsgAuditError("会话存档 SDK 路径未配置(WECOM_SID_SDK_PATH)")
+        try:
+            self._lib = ctypes.CDLL(sdk_path)
+        except OSError as e:
+            raise MsgAuditError(f"会话存档 SDK 加载失败: {sdk_path}: {e}") from e
+        # 官方 C 接口签名:int Init(const char* corpid, const char* secret)
+        self._lib.Init.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+        self._lib.Init.restype = ctypes.c_void_p
+        # ssize_t GetChatData(void* sdk, unsigned long long seq, unsigned int limit,
+        #                     const char* proxy, const char* passwd, unsigned int timeout,
+        #                     char** msg_data) — 官方签名,代理/密码允许传 None
+        self._lib.GetChatData.argtypes = [
+            ctypes.c_void_p, ctypes.c_ulonglong, ctypes.c_uint,
+            ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint,
+            ctypes.POINTER(ctypes.c_char_p),
+        ]
+        self._lib.GetChatData.restype = ctypes.c_ssize_t
+        # int Destroy(void* sdk)
+        self._lib.Destroy.argtypes = [ctypes.c_void_p]
+        self._lib.Destroy.restype = ctypes.c_int
+        self._handle = self._lib.Init(corp_id.encode("utf-8"), secret.encode("utf-8"))
+        if not self._handle:
+            raise MsgAuditError(f"会话存档 SDK Init 失败(corp_id={corp_id})")
+        self._timeout_s = timeout_s
+
+    def get_chat_data(self, seq: int, limit: int) -> list[dict]:
+        """拉取加密批并解析;非 0 返回码/空指针/非法 JSON 抛 MsgAuditError"""
+        out = ctypes.c_char_p()
+        ret = self._lib.GetChatData(self._handle, seq, limit, None, None,
+                                    self._timeout_s, ctypes.byref(out))
+        if ret != 0:
+            raise MsgAuditError(f"GetChatData 失败 ret={ret} seq={seq}")
+        raw_bytes = out.value  # SDK 内部分配的 JSON 串;官方另有 FreeData,本实现不持引用即可
+        if not raw_bytes:
+            raise MsgAuditError(f"GetChatData 返回空数据 seq={seq}")
+        return parse_chat_data(raw_bytes.decode("utf-8"))
+
+    def destroy(self) -> None:
+        """释放 SDK 句柄(进程退出时调用;幂等)"""
+        if getattr(self, "_handle", None):
+            self._lib.Destroy(self._handle)
+            self._handle = None
 
 
 def decrypt_random_key(encrypt_random_key_b64: str, private_key_pem: bytes) -> str:

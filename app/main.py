@@ -22,6 +22,10 @@ async def lifespan(app: FastAPI):
     if missing:
         logging.getLogger(__name__).warning(
             "缺少配置: %s —— 出站发送与回调验签将失败", ", ".join(missing))
+    # 企微会话存档后台同步(WECOM_SID_ENABLED=false 时不启动,内部降级不抛)
+    from .wecom.sync import start_sync_task
+
+    start_sync_task(app)
     yield
     from .rpa_client import close as close_rpa_client
 
