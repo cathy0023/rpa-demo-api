@@ -45,3 +45,51 @@ uvicorn app.main:app --host 127.0.0.1 --port 8100 --reload
 ```bash
 python -m pytest tests/ -v
 ```
+
+## 企微侧边栏配置
+
+企微侧边栏（`/api/v1/wecom/sidebar/*` + 前端 `sidebar.html`）提供「打开侧边栏 → 识别客户 → 画像+历史 → 生成话术」闭环。变量名以 `app/wecom/config.py` / `app/wecom/sync.py` 实际读取为准，占位模板见 `.env.example`。密钥（app_secret / cookie_secret / msgaudit 私钥）只走环境变量，绝不入库。
+
+### 一、企微管理后台准备
+
+1. **创建自建应用**：管理后台 → 应用管理 → 自建 → 创建应用，记录 `CorpID`（我的企业页）→ `WECOM_CORP_ID`、`AgentId` → `WECOM_AGENT_ID`、`Secret` → `WECOM_APP_SECRET`。
+2. **网页授权及 JS-SDK 可信域名**：应用详情 → 开发者接口 → 网页授权及 JS-SDK → 配置可信域名。要求：
+   - 域名须通过 ICP 备案；
+   - 下载「域名归属验证」文件放到站点根目录（后端需能响应 `https://<域名>/WW_verify_xxxx.txt`）。
+3. **配置到聊天工具栏**：应用详情 → 配置到聊天工具栏，页面地址填 `https://<域名>/sidebar.html`。
+4. **可见范围**：配置应用可见范围，仅侧边栏目标使用者的部门/成员可见。
+
+### 二、会话存档（可选）
+
+未开通会话存档时保持 `WECOM_SID_ENABLED=false`（默认），应用照常可用，仅 `/history` 走降级返回空数组。开通步骤：
+
+1. 管理后台 → 安全与管理 → 管理工具 → 会话存档，开通并配置 **RSA 公钥**（本地生成 RSA 密钥对，公钥填后台，私钥全文放 `WECOM_SID_MSGAUDIT_PRIVATE_KEY`）。
+2. 下载官方 **会话存档 C SDK**（`libWeWorkFinanceSdk_C.so`/`.dylib`），将其绝对路径填 `WECOM_SID_SDK_PATH`。
+3. 设 `WECOM_SID_ENABLED=true`，重启后 lifespan 自动启动后台同步任务（轮询间隔 `WECOM_SID_POLL_INTERVAL`，默认 5 秒）。
+
+### 三、本地联调（Whistle 代理）
+
+可信域名必须是备案域名，本地无法直接通过企微校验，用 Whistle 把可信域名代理到本机：
+
+```
+# whistle 规则(默认端口 8899)
+<你的备案域名>/sidebar http://localhost:5274/sidebar.html
+<你的备案域名>/api http://localhost:8000/api
+```
+
+- 企微客户端配代理指向 Whistle 后，打开聊天工具栏页面即命中本地 vite（5274）与 uvicorn（8000）。
+- `WECOM_SID_TRUSTED_DOMAIN` 填该备案域名（与 JS-SDK 签名 url 域名一致）；本地纯 dev 联调可留空，留空 = `/sign` 放行任意域名（仅限开发）。
+- 页面地址仍填 `https://<域名>/sidebar.html`。
+
+### 四、启动
+
+```bash
+# 后端(8000):WECOM_SID_ENABLED=false 时会话存档同步不启动(降级),其余端点正常
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+# 前端 sidebar(vite 5274,/api 代理到 8000)
+pnpm dev
+# 访问 http://localhost:5274/sidebar.html
+```
+
+降级开关：`WECOM_SID_ENABLED=false`（或缺省）→ 同步任务不启动、`/history` 返回空数组，画像/生成不受影响；`true` 但缺 SDK 或私钥 → 同步任务降级为 Disabled 并记日志，不阻断应用启动。
