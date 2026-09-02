@@ -1,0 +1,30 @@
+"""企微侧边栏配置:环境变量集中读取。密钥绝不入库(对齐 app/config.py 范式)。"""
+import os
+from dataclasses import dataclass, field
+
+
+def _env_bool(key: str, default: str) -> bool:
+    """读布尔环境变量("1"/"true"/"yes" 视为真,不区分大小写)"""
+    return os.getenv(key, default).strip().lower() in ("1", "true", "yes", "on")
+
+
+@dataclass(frozen=True)
+class WecomConfig:
+    """企微侧边栏全局配置(一次性读取,进程内不变)"""
+
+    # --- 企微基础(企业后台「我的企业」/「应用管理」) ---
+    corp_id: str = field(default_factory=lambda: os.getenv("WECOM_CORP_ID", ""))
+    agent_id: str = field(default_factory=lambda: os.getenv("WECOM_AGENT_ID", ""))
+    app_secret: str = field(default_factory=lambda: os.getenv("WECOM_APP_SECRET", ""))
+
+    # --- 侧边栏安全 ---
+    trusted_domain: str = field(default_factory=lambda: os.getenv("WECOM_SID_TRUSTED_DOMAIN", ""))
+    cookie_secret: str = field(default_factory=lambda: os.getenv("WECOM_SID_COOKIE_SECRET", ""))
+    sid_enabled: bool = field(default_factory=lambda: _env_bool("WECOM_SID_ENABLED", "false"))
+
+    # --- 会话存档同步 ---
+    poll_interval_s: int = field(default_factory=lambda: int(os.getenv("WECOM_SID_POLL_INTERVAL", "5")))
+    sdk_path: str = field(default_factory=lambda: os.getenv("WECOM_SID_SDK_PATH", ""))
+
+
+wecom_config = WecomConfig()
