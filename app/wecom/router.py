@@ -4,6 +4,7 @@
 除 /sign 外的端点经 get_current_staff 守卫(AC8:无/坏 cookie → HTTP 401 + 信封)。
 测试注入:configure(cfg=..., token_client_factory=...);生产用全局 wecom_config 惰性单例。
 """
+import asyncio
 import logging
 import secrets
 import time
@@ -19,7 +20,10 @@ from ..schemas import ok
 from .auth import sign_session, verify_session
 from .config import WecomConfig, wecom_config
 from .contact import WecomContactError, get_contact_profile
+from .context import get_recent_history
 from .deps import SESSION_COOKIE, get_current_staff
+from .generate import generate_script
+from .llm_shared import LlmError
 from .signature import jsapi_signature
 from .token import WecomApiError, WecomTokenClient
 
@@ -38,6 +42,7 @@ _CONTACT_NOT_EXIST_CODES = {84060, 84061}
 _cfg: WecomConfig | None = None
 _token_client: WecomTokenClient | None = None
 _http_transport: httpx.BaseTransport | None = None  # login 直连 getuserinfo 用,测试注入 mock
+_llm_transport: httpx.BaseTransport | None = None  # generate 调 LLM 用,测试注入 mock
 
 
 def configure(cfg: WecomConfig, token_client_factory=None, http_transport: httpx.BaseTransport | None = None) -> None:
@@ -46,6 +51,12 @@ def configure(cfg: WecomConfig, token_client_factory=None, http_transport: httpx
     _cfg = cfg
     _token_client = token_client_factory() if token_client_factory else None
     _http_transport = http_transport
+
+
+def configure_llm_transport(transport: httpx.BaseTransport | None) -> None:
+    """测试注入 LLM mock transport;生产不调用(generate_script 走真实 httpx)"""
+    global _llm_transport
+    _llm_transport = transport
 
 
 def _active_cfg() -> WecomConfig:
@@ -170,8 +181,38 @@ def history(userid: str = Depends(get_current_staff)):
                         detail={"code": 5001, "message": "history 未实现", "data": {"userid": userid}})
 
 
+class GenerateBody(BaseModel):
+    """外部联系人 ID + 可选场景/排除内容(「换一条」时前端回传上次话术)"""
+    userid: str
+    scenario: str = ""
+    exclude: str = ""
+
+
 @router.post("/generate")
-def generate(userid: str = Depends(get_current_staff)):
-    """占位:T5 替换为话术生成"""
-    raise HTTPException(status_code=HTTP_501_NOT_IMPLEMENTED,
-                        detail={"code": 5001, "message": "generate 未实现", "data": {"userid": userid}})
+def generate(body: GenerateBody, staff_userid: str = Depends(get_current_staff)):
+    """生成 1 条销售话术:画像 + 最近对话(T8 前表缺失→空)+ 场景/排除注入 prompt。
+
+    userid=外部联系人 ID(前端 getCurExternalContact);staff_userid=会话守卫身份
+    """
+    cfg = _active_cfg()
+    try:
+        access_token = _client().get_access_token()
+    except WecomApiError as e:
+        logger.warning("generate 取 access_token 失败: %s", e)
+        return _err(4004, f"企微凭据获取失败: {e}")
+    try:
+        profile = get_contact_profile(access_token, body.userid,
+                                      transport=_http_transport, corp_id=cfg.corp_id)
+    except WecomContactError as e:
+        logger.warning("generate 取画像失败: %s", e)
+        if e.errcode in _CONTACT_NOT_EXIST_CODES:
+            return _err(4101, f"外部联系人不存在或无好友关系: {body.userid} (errcode={e.errcode})")
+        return _err(4102, f"客户画像获取失败: {e}")
+    history = get_recent_history(body.userid, limit=20)
+    try:
+        script = asyncio.run(generate_script(
+            profile, history, body.scenario, body.exclude, transport=_llm_transport))
+    except LlmError as e:
+        logger.warning("generate LLM 调用失败: %s", e)
+        return _err(4201, f"话术生成失败: {e}")
+    return ok({"script": script})
