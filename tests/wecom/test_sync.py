@@ -50,16 +50,21 @@ CUST = "wm_cust_001"
 PRIVATE_PEM, PUBLIC_PEM = _rsa_keypair_pem()  # 全模块共用一对密钥,keygen 慢避免重复
 
 
-def _text_msg(seq: int, sender: str, receiver: str, content: str) -> dict:
-    """企微 msgaudit 文本消息结构:tolist 为对象数组 [{id, type}]"""
-    return {
+def _text_msg(seq: int, sender: str, receiver: str, content: str,
+              roomid: str = "", tolist: list[dict] | None = None) -> dict:
+    """企微 msgaudit 文本消息结构:tolist 为对象数组 [{id, type}];群聊带 roomid"""
+    receivers = tolist if tolist is not None else [{"id": receiver, "type": "single"}]
+    msg = {
         "msgid": 1000 + seq,
         "from": sender,
-        "tolist": [{"id": receiver, "type": "single"}],
+        "tolist": receivers,
         "msgtime": 1700000000 + seq,
         "msgtype": "text",
         "text": {"content": content},
     }
+    if roomid:
+        msg["roomid"] = roomid
+    return msg
 
 
 def _envelope(seq: int, msg: dict) -> dict:
@@ -207,6 +212,69 @@ def test_sync_once_skips_internal_only_conversation(tmp_path):
     try:
         assert sync_mod.sync_once(client, PRIVATE_PEM, CORP_ID) == 0
         assert _rows(conn) == []
+    finally:
+        set_msgaudit_conn(None)
+        conn.close()
+
+
+# ---------- 6b. 群聊/多对端消息不入库(泄漏防御) ----------
+
+def test_sync_once_skips_group_messages_with_roomid(tmp_path):
+    """roomid 非空(群聊,即使含外部成员)→ 不入库,游标照常推进"""
+    group_msg = _text_msg(1, STAFF, "", "群聊里的消息",
+                          roomid="wr_group_001", tolist=[{"id": CUST, "type": "group"}])
+    items = [
+        _envelope(1, group_msg),
+        _envelope(2, _text_msg(2, STAFF, CUST, "正常单聊")),
+    ]
+    client, conn = _make_env(tmp_path, items)
+    try:
+        assert sync_mod.sync_once(client, PRIVATE_PEM, CORP_ID) == 1
+        rows = _rows(conn)
+        assert [r["content"] for r in rows] == ["正常单聊"]
+        assert all(not r["content"].startswith("群聊") for r in rows)
+    finally:
+        set_msgaudit_conn(None)
+        conn.close()
+
+
+def test_sync_once_skips_customer_initiated_group_message(tmp_path):
+    """客户在群里发的消息(群聊)同样不入库"""
+    group_msg = _text_msg(1, CUST, "", "客户在群里问", roomid="wr_group_002")
+    client, conn = _make_env(tmp_path, [_envelope(1, group_msg)])
+    try:
+        assert sync_mod.sync_once(client, PRIVATE_PEM, CORP_ID) == 0
+        assert _rows(conn) == []
+    finally:
+        set_msgaudit_conn(None)
+        conn.close()
+
+
+def test_sync_once_skips_multi_recipient_messages(tmp_path):
+    """tolist 过滤后对端 != 1(群发/多对端)→ 保守跳过不入库"""
+    multi = _text_msg(1, STAFF, "", "同时发给两个人",
+                      tolist=[{"id": CUST, "type": "single"}, {"id": STAFF2, "type": "single"}])
+    client, conn = _make_env(tmp_path, [_envelope(1, multi)])
+    try:
+        assert sync_mod.sync_once(client, PRIVATE_PEM, CORP_ID) == 0
+        assert _rows(conn) == []
+    finally:
+        set_msgaudit_conn(None)
+        conn.close()
+
+
+def test_sync_once_single_chat_both_directions_still_persisted(tmp_path):
+    """加固回归:1v1 单聊双向(员工→客户 / 客户→员工)仍正常入库"""
+    items = [
+        _envelope(1, _text_msg(1, STAFF, CUST, "员工发给客户")),
+        _envelope(2, _text_msg(2, CUST, STAFF, "客户回给员工")),
+    ]
+    client, conn = _make_env(tmp_path, items)
+    try:
+        assert sync_mod.sync_once(client, PRIVATE_PEM, CORP_ID) == 2
+        rows = _rows(conn)
+        assert [r["from_role"] for r in rows] == ["staff", "customer"]
+        assert all(r["external_userid"] == CUST for r in rows)
     finally:
         set_msgaudit_conn(None)
         conn.close()

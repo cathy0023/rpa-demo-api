@@ -8,6 +8,8 @@
   SDK/私钥缺失等启动异常降级 DisabledChatArchiveClient 并返回 None,不阻断应用启动
 
 from_role 判定与 get_history_records 一致:sender==external_userid → customer,否则 staff。
+入库判据(保守):roomid 空(非群聊)+ tolist 过滤后对端恰 1(非群发)+ 对端/sender
+为外部联系人(wo/wm/wp 前缀启发式,有自定义 userid 误判局限,见 _is_external)。
 """
 import asyncio
 import logging
@@ -44,17 +46,32 @@ def _read_last_seq(conn: sqlite3.Connection, corp_id: str) -> int:
 
 
 def _is_external(userid: str) -> bool:
-    """企微外部联系人 userid 约定以 wo/wm/wp 开头(企业内部 userid 不带此前缀)"""
+    """外部联系人 userid 启发式:约定以 wo/wm/wp 开头。
+
+    局限:该前缀是企微默认分配规则,企业自定义 userid 时可能误判(内外部判定不绝对可靠)。
+    因此仅作为「roomid 空 + 对端恰 1」单聊判据之上的附加条件,不单独作为入库依据。
+    """
     return userid.startswith(("wo", "wm", "wp"))
 
 
-def _pick_external(from_user: str, tolist_ids: list[str]) -> str | None:
-    """会话任一端是外部联系人则返回该 external_userid;纯内部会话返回 None(不入库)"""
+def _pick_external(from_user: str, tolist_ids: list[str], roomid: str = "") -> str | None:
+    """保守单聊判据:仅群外单聊且对端恰为 1 个外部联系人时返回该 external_userid。
+
+    - roomid 非空 → 群聊,一律跳过(群聊非侧边栏场景,防泄漏)
+    - tolist 过滤空后对端 != 1 → 群发/多对端,保守跳过
+    - 单聊场景下 sender 与唯一对端任一为外部联系人(wo/wm/wp 前缀)才入库;
+      前缀启发式有误判风险(见 _is_external 局限),但配合 roomid+单对端判据已收敛
+    纯内部会话/群聊/多对端返回 None(不入库)。
+    """
+    if roomid:
+        return None
+    peers = [u for u in tolist_ids if u]
+    if len(peers) != 1:
+        return None
     if _is_external(from_user):
         return from_user
-    for userid in tolist_ids:
-        if _is_external(userid):
-            return userid
+    if _is_external(peers[0]):
+        return peers[0]
     return None
 
 
@@ -106,8 +123,8 @@ def sync_once(client: ChatArchiveClient, private_key_pem: bytes, corp_id: str) -
             content = msg.get("text", {}).get("content")
             sender = msg.get("from", "")
             tolist_ids = [t.get("id", "") for t in msg.get("tolist", [])]
-            external = _pick_external(sender, tolist_ids)
-            if external is None:  # 同事间内部会话,无外部联系人,不入库
+            external = _pick_external(sender, tolist_ids, roomid=str(msg.get("roomid", "") or ""))
+            if external is None:  # 群聊/多对端/纯内部会话,不入库
                 last_seq = max(last_seq, seq)
                 continue
             if not content:
