@@ -3,8 +3,9 @@
 启动: uvicorn app.main:app --host 127.0.0.1 --port 8100 --reload
 前端(rpa-demo-web, vite 5274)经 proxy 把 /api 转发到此。
 """
+import asyncio
 import logging
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -44,8 +45,13 @@ async def lifespan(app: FastAPI):
     # 企微会话存档后台同步(WECOM_SID_ENABLED=false 时不启动,内部降级不抛)
     from .wecom.sync import start_sync_task
 
-    start_sync_task(app)
+    sync_task = start_sync_task(app)  # 持强引用,防任务被 GC 中途回收
     yield
+    # 优雅停机:取消后台同步任务并等待其处理 CancelledError,不残留运行中协程
+    if sync_task is not None and not sync_task.done():
+        sync_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await sync_task
     from .rpa_client import close as close_rpa_client
 
     await close_rpa_client()
