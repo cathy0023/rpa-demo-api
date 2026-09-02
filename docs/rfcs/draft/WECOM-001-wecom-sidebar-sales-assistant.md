@@ -66,11 +66,12 @@ status: Draft
 | `app/wecom/config.py` | 企微配置 | 继承 frozen dataclass 范式：`WECOM_CORP_ID` / `WECOM_APP_SECRET` / `WECOM_AGENT_ID` / `WECOM_SID_RSA_PRIVATE_KEY`（env 或文件路径）/ `WECOM_SID_ENABLED` 开关 |
 | `app/wecom/token.py` | access_token + 双 ticket 缓存 | 内存缓存 + 过期前 300s 主动刷新；企业 ticket 与应用 ticket 分开存 |
 | `app/wecom/signature.py` | 签名生成 | `sha1(jsapi_ticket=..&noncestr=..&timestamp=..&url=..)`，url 去除 # 后内容 |
-| `app/wecom/contact.py` | 客户画像代理 | `GET /cgi-bin/externalcontact/get`，输出精简画像 dict（昵称/备注/公司/标签） |
+| `app/wecom/auth.py` | 员工身份兑换 | `POST /cgi-bin/auth/getuserinfo`：前端 `wx.qy.login` 的 code 兑换当前员工 userid，写入短期签名 cookie（HttpOnly，2h）作为后续请求身份锚点 |
+| `app/wecom/contact.py` | 客户画像代理 | `GET /cgi-bin/externalcontact/get`，输出精简画像 dict（昵称/备注/公司/标签）；读写 `wecom_profile_cache`（TTL 10 分钟） |
 | `app/wecom/msgaudit.py` | 会话存档拉取+解密 | ctypes 封装官方 C SDK（可选用 pypi `wecom-audit`，锁定 fallback 为自封装）；`GetChatData(seq)` → RSA PKCS1 → AES-256-CBC；文本消息优先，媒体消息存元数据不下载 |
-| `app/wecom/sync.py` | 同步后台任务 | asyncio task 秒级轮询（可配 `WECOM_SID_POLL_INTERVAL`），seq 持久化到 SQLite `sync_state` 表；单聊文本消息写入 `wecom_chat_history` 表 |
+| `app/wecom/sync.py` | 同步后台任务 | asyncio task 秒级轮询（可配 `WECOM_SID_POLL_INTERVAL`），seq 持久化到 SQLite `sync_state` 表；单聊文本消息写入 `wecom_chat_history` 表；落库走 `asyncio.to_thread` 分批写入避免阻塞事件循环；单条解密失败跳过并告警日志，不中断轮询 |
 | `app/wecom/context.py` | 上下文组装 | 画像 dict + 最近 N 条聊天（`wecom_chat_history` 按 external_userid 倒序）拼成 LLM prompt 输入 |
-| `app/wecom/generate.py` | 话术生成 | 重构 `llm.py` 的 SYSTEM_PROMPT 为侧边栏话术场景（输入画像+历史+指令，输出 1 条话术），复用其 httpx 调用与思维链兼容逻辑 |
+| `app/wecom/generate.py` | 话术生成 | 新建侧边栏专属 SYSTEM_PROMPT（输出 1 条 ≤200 字话术），复用 `llm.py` 的 httpx 调用与思维链兼容逻辑（提取共享函数，`llm.py` 原 RPA 路径行为不变） |
 | `app/wecom/router.py` | 路由 | 4 个端点（见下），挂载到 `api_router` |
 
 ### API 设计
@@ -80,11 +81,12 @@ status: Draft
 | 端点 | 方法 | 入参 | 出参 |
 |------|------|------|------|
 | `/api/v1/wecom/sidebar/sign` | GET | `?url=<当前页面URL>` | `{corp_id, agent_id, config_sig, agent_config_sig, nonce_str, timestamp}`（双签名一次返回） |
+| `/api/v1/wecom/sidebar/login` | POST | `{code}`（`wx.qy.login` 返回） | 兑换员工 userid，`Set-Cookie` 签名会话（HttpOnly 2h） |
 | `/api/v1/wecom/sidebar/profile` | GET | `?userid=<external_userid>` | 精简画像（name/remark/company/tags/desc） |
 | `/api/v1/wecom/sidebar/history` | GET | `?userid=<external_userid>&limit=20` | `[{role, content, ts}]` |
 | `/api/v1/wecom/sidebar/generate` | POST | `{userid, scenario?}` | `{script}`（1 条话术） |
 
-鉴权：MVP 阶段侧边栏页面处于企微 WebView 内，`sign` 端点校验 url 必须属于已配置可信域名；`generate`/`profile`/`history` 校验 userid 必须能通过企微接口反查到（存在性校验），防任意枚举。MVP 不引入独立用户登录态（Non-Goal 里注明 SaaS 阶段补 OAuth 登录）。
+鉴权（身份锚点设计）：`login` 端点将 `wx.qy.login` 的 code 兑换为员工 userid，作为后续请求的身份锚点；`profile`/`history`/`generate` 三个端点要求有效会话 cookie 才能调用，防止任意访客枚举拉取客户会话存档（敏感数据暴露面控制）。`sign` 端点校验 url 必须属于已配置可信域名（`WECOM_SID_TRUSTED_DOMAIN`）。该设计为轻量会话锚点而非完整 OAuth 登录体系，不违背「MVP 不做登录态」的决策本意；SaaS 阶段升级为标准 OAuth（见 Non-Goals）。
 
 ### 数据模型（SQLite，新增 3 表）
 
@@ -93,7 +95,8 @@ CREATE TABLE IF NOT EXISTS wecom_chat_history (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     corp_id         TEXT NOT NULL,
     external_userid TEXT NOT NULL,
-    from_role       TEXT NOT NULL,      -- 'staff' | 'customer'
+    sender_userid   TEXT NOT NULL,      -- 发送者：员工 userid 或 external_userid
+    from_role       TEXT NOT NULL,      -- 'staff' | 'customer'（sender==external_userid 判定为 customer）
     content         TEXT NOT NULL,
     msg_ts          INTEGER NOT NULL,
     seq             INTEGER NOT NULL UNIQUE  -- 幂等：seq 唯一
@@ -123,44 +126,51 @@ CREATE TABLE IF NOT EXISTS wecom_profile_cache (
 
 ### 关键技术决策
 
-1. **SDK 选型**：优先自封装 ctypes 调用官方 C SDK（`libWeWorkFinanceSdk_C.so`/`.dylib`），理由：`wecom-audit` 等 pypi 包维护活跃度未知、平台二进制兼容风险，自封装仅涉及 3 个 C 函数（Init/GetChatData/Destroy），可控。将 msgaudit 拉取设计为接口抽象，SDK 可替换。
+1. **SDK 选型**：接口抽象 + 自封装 ctypes 调用官方 C SDK 为默认实现（`libWeWorkFinanceSdk_C.so`/`.dylib`，仅 Init/GetChatData/Destroy 3 个函数）；pypi `wecom-audit` 为备选实现（驳回为默认的理由：维护活跃度未知、平台二进制兼容风险）。
 2. **上下文窗口**：最近 20 条聊天（约 1-2k token）+ 画像 ≤300 token，一次生成总输入 ≤3k token，成本可控；不做 LLM 预摘要（MVP）。
 3. **降级路径**：`WECOM_SID_ENABLED=false`（会话存档未开通）时 `/history` 返回空、生成仅基于画像+scenario 输入，功能不中断。
 4. **同步任务生命周期**：FastAPI lifespan 启动 asyncio task，`WECOM_SID_ENABLED=false` 时不启动。
+5. **部署与联调拓扑**：侧边栏 H5 与 API 同源部署（FastAPI 托管前端构建产物 `sidebar.html` 静态资源），避免 CORS；本地开发用 Vite dev server + Whistle 将可信域名代理到本地，API 走 Vite proxy 转发到 uvicorn，`main.py` CORS 白名单补充 dev origin。
+6. **scenario 参数语义**：MVP 阶段 `scenario` 为可选自由文本（销售手动补充的临时场景说明，如「客户在比价」），不暴露固定意图分档（开场/逼单等）——意图分档待销售团队反馈后在后续迭代定义。
+7. **重生随机性**：`generate` 支持 `exclude` 入参（上一条话术文本），prompt 中注入避免重复指令，temperature 维持 0.7。
 
 ## Implementation
 
 ### 阶段 1：后端侧边栏模块（不含会话存档）
 
-1. `app/wecom/config.py` + `token.py` + `signature.py` + 单测（token 缓存刷新逻辑 mock httpx、签名算法已知向量验证）
-2. `app/wecom/contact.py` + `/sign` `/profile` 端点 + 单测（mock 企微 API）
-3. `app/wecom/generate.py`（基于画像+scenario 的生成）+ `/generate` 端点 + 单测（mock LLM）
-4. `app/wecom/router.py` 挂载 + `routers/__init__.py` 注册
+1. `app/wecom/config.py`（含 `WECOM_SID_TRUSTED_DOMAIN`）+ `token.py` + `signature.py` + 单测（token 缓存刷新逻辑 mock httpx、签名算法已知向量验证）
+2. `app/wecom/auth.py` + `/sign` `/login` 端点（会话 cookie 签发与校验）+ 单测
+3. `app/wecom/contact.py`（画像 + profile_cache 读写 TTL 10min）+ `/profile` 端点 + 单测（mock 企微 API）
+4. `app/wecom/generate.py`（侧边栏专属 prompt，提取 llm.py 共享调用函数，原 RPA 路径不动）+ `/generate` 端点（含 exclude 去重）+ 单测（mock LLM）
+5. `app/wecom/router.py` 挂载 + `routers/__init__.py` 注册 + CORS dev origin
 
 ### 阶段 2：会话存档链路
 
-5. `db.py` 新增 3 表（`wecom_chat_history` / `sync_state` / `wecom_profile_cache`）+ 迁移兼容测试
-6. `app/wecom/msgaudit.py` ctypes 封装 + RSA/AES 解密 + 单测（用自构造密文向量验证解密链路）
-7. `app/wecom/sync.py` 轮询任务 + `/history` 端点 + 单测（mock SDK 返回加密消息）
+6. `db.py` 新增 3 表（`wecom_chat_history` 含 sender_userid / `sync_state` / `wecom_profile_cache`）+ 迁移兼容测试
+7. `app/wecom/msgaudit.py` ctypes 封装 + RSA/AES 解密 + 单测（cryptography 库自构造密文向量验证解密链路）
+8. `app/wecom/sync.py` 轮询任务（to_thread 分批落库、解密失败跳过+告警）+ `/history` 端点 + 单测（mock SDK 返回加密消息）
 
 ### 阶段 3：前端侧边栏 H5
 
-8. Vite 多页配置 + `src/sidebar/auth.ts` + `Assistant.tsx` + `sidebar.html`
-9. 前后端联调：pnpm build 通过 + 本地 mock 企微 JS-SDK 的冒烟路径
+9. Vite 多页配置 + `sidebar.html`（引入企微 jweixin SDK script）+ `src/sidebar/auth.ts`（wx.config→agentConfig→login→getCurExternalContact，逐步骤报错）+ `Assistant.tsx`（三态 + 复制/换一条/exclude 传参；生成超时阈值 15s 独立于后端 30s）
+10. 前后端联调：pnpm build 通过 + Vite proxy + 本地 mock 企微 JS-SDK 的冒烟路径；FastAPI 托管 sidebar 静态资源验证同源部署
 
 ### 阶段 4：配置与文档
 
-10. `.env.example` 更新（全部 `WECOM_*` 变量）+ README 侧边栏配置指引 + docs 联调说明
+11. `.env.example` 更新（全部 `WECOM_*` 变量）+ README 侧边栏配置指引 + docs 联调说明
 
 ## Acceptance Criteria
 
-1. **单测全绿**：`pytest tests/` 覆盖签名算法（已知向量）、token 缓存刷新、RSA/AES 解密往返（自构造向量）、sync 幂等（同 seq 不重复落库）、generate 降级路径；前端 `pnpm build` 通过。
-2. **鉴权链路可用**：配好真实 corp_id/secret 后，`/sign` 返回双签名，侧边栏 H5 在企微客户端内完成 `wx.config`→`wx.agentConfig`→`getCurExternalContact`，拿到真实 external_userid（需企微环境，联调项）。
-3. **画像与历史注入**：`/profile` 返回精简画像；会话存档开通时 `/history` 返回该客户最近消息（mock SDK 环境下验证）。
-4. **话术生成**：`/generate` 输入 userid 后返回 1 条 ≤200 字、基于画像+历史上下文的中文话术；LLM 未配 key 时返回明确错误信封（code≠2000）。
-5. **幂等与留存**：同一 seq 的会话存档消息重复拉取不重复落库；重启后从 `sync_state.last_seq` 续拉。
-6. **降级可用**：`WECOM_SID_ENABLED=false` 时服务正常启动，`/generate` 仅用画像+scenario 出话术。
-7. **密钥零入库**：全部 `WECOM_*` 密钥走环境变量，代码/测试/文档中无真实密钥。
+> 每条标注验收环境：**[本地]** = 无真实企微环境可验证；**[联调]** = 需真实企微环境。
+
+1. **[本地] 单测全绿**：`pytest tests/` 覆盖签名算法（已知向量）、token 缓存刷新、login 会话 cookie 签发与校验、RSA/AES 解密往返（自构造向量）、sync 幂等（同 seq 不重复落库）、generate 降级路径；前端 `pnpm build` 通过。
+2. **[联调] 鉴权链路可用**：前置条件=可信域名（ICP 备案）+企微后台配置+重启企微；配好真实 corp_id/secret 后，`/sign` 返回双签名，侧边栏 H5 在企微客户端内完成 `wx.config`→`wx.agentConfig`→`login`（拿到员工身份）→`getCurExternalContact`，拿到真实 external_userid。
+3. **[联调+本地] 画像与历史注入**：[联调] `/profile` 返回真实精简画像；[本地] `/history` 在 mock SDK 环境下返回该客户最近消息；会话存档未开通时 `/history` 返回 `code:2000, data:[]`（降级语义）。
+4. **[本地] 话术生成**：`/generate` 输入 userid（需有效会话 cookie）后返回 1 条 ≤200 字、基于画像+历史上下文的中文话术；LLM 未配 key 时返回明确错误信封（code≠2000）。
+5. **[本地] 幂等与留存**：同一 seq 的会话存档消息重复拉取不重复落库；重启后从 `sync_state.last_seq` 续拉；解密失败消息跳过且不中断轮询（告警日志可查）。
+6. **[本地] 降级可用**：`WECOM_SID_ENABLED=false` 时服务正常启动，`/generate` 仅用画像+scenario 出话术。
+7. **[本地] 密钥零入库**：全部 `WECOM_*` 密钥走环境变量，代码/测试/文档中无真实密钥。
+8. **[本地] 访问控制**：无有效会话 cookie 访问 `profile`/`history`/`generate` 返回 401 语义错误信封。
 
 ## Notes
 
@@ -169,17 +179,26 @@ CREATE TABLE IF NOT EXISTS wecom_profile_cache (
 - **R1 会话存档开通状态未知（最大风险）**：需企业购买+合规审批。缓解：`WECOM_SID_ENABLED` 开关 + 降级路径（仅画像生成），未开通也不阻塞阶段 1/3。
 - **R2 C SDK 平台兼容**：开发机 macOS(arm64)、部署 Linux(x64)，二进制不同。缓解：SDK 路径可配置，单测不依赖真实 .so（mock SDK 层）。
 - **R3 可信域名需 ICP 备案**：开发联调靠 Whistle 代理绕过公网要求，但企微后台配置的域名仍需备案域名；若公司无现成备案域名需提前申请（外部依赖，跨阶段跟踪）。
+- **R5 scenario/prompt 风格待产品拍板**：MVP 以自由文本 scenario + 通用销售话术 prompt 承接，正式意图分档与风格基调待销售团队/产品反馈后迭代（brainstorm 待解决问题 #4 的承接）。
 - **R4 SaaS 化演进**：MVP 数据模型已带 corp_id 维度、配置集中，代开发模式升级时凭证从环境变量变为按租户存储（超出本 RFC 范围）。
 
 ### Alternatives（已驳回）
 
-- **方案 A 扩展现有服务直接改**（无独立 wecom 包）：耦合 RPA demo 逻辑，驳回。
+- **方案 A 扩展现有服务直接改**（无独立 wecom 包）：耦合 RPA demo 逻辑，驳回。本 RFC 实质承接 brainstorm 选定的方案 C（会话存档深度方案），A/B 为 brainstorm 中已讨论未选的备选。
 - **方案 B 独立 sidebar-api 服务**：边界干净但验证期运维翻倍，作为 SaaS 阶段演进形态保留。
 - **LLM 预摘要历史上下文**：MVP 输入 ≤3k token 无需摘要，成本不敏感后再考虑。
+- **pypi wecom-audit 作为默认 SDK**：维护活跃度未知 + 平台二进制兼容风险，驳回为默认（保留为备选实现，见关键技术决策 #1）。
+- **固定意图分档（开场/逼单/异议）作为前端选项**：意图体系需销售团队定义，MVP 先以自由文本 scenario 承接，待反馈后迭代。
 
 ### Non-Goals
 
-群聊场景 / 一键发送到会话 / 管理后台 / 使用数据统计 / SaaS 多租户与代开发上架 / RPA demo 能力整合。
+群聊场景 / 一键发送到会话 / 管理后台 / 使用数据统计 / 生成记录落库与展示（MVP 裁剪：生成即用即走，留存待效果回流需求出现再做）/ SaaS 多租户与代开发上架（含标准 OAuth 登录体系，MVP 仅用轻量会话锚点）/ 移动端企微侧边栏适配（MVP 仅适配 PC 端 360-400px 宽度）/ RPA demo 能力整合。
+
+### 边界场景处理
+
+- **聊天对象非外部联系人**（同事间单聊）：`getCurExternalContact` 无返回 → 前端 auth.ts 明确提示「当前会话非客户单聊」，不进入助手主界面。
+- **会话存档解密失败**（RSA 密钥配置错误/轮换）：单条跳过 + 告警日志，轮询不中断；连续失败率超阈值时日志升级为 ERROR 提示人工介入。
+- **同事间会话数据**：GetChatData 返回全企业流，仅落库 `from_role` 可判定且对端为 external_userid（外部联系人）的单聊消息，内部单聊不入库。
 
 ### 调研来源
 
