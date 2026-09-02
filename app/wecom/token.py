@@ -1,12 +1,12 @@
 """企微凭据客户端:access_token + 双 jsapi_ticket,内存缓存 + 提前 300s 主动刷新。
 
-接口区别:
+接口区别(官方文档口径,两个 ticket 是不同端点):
 - access_token:   GET /cgi-bin/gettoken?corpid=&corpsecret=  (应用级,调用一切接口的凭证)
-- 企业 jsapi_ticket: GET /cgi-bin/get_jsapi_ticket?access_token=&type=consumer
-                  (企业级,wx.config 用;全企业共享一个)
+- 企业 jsapi_ticket: GET /cgi-bin/get_jsapi_ticket?access_token=
+                  (企业级,wx.config 用;全企业共享一个;无 type 参数)
 - 应用 jsapi_ticket: GET /cgi-bin/ticket/get?access_token=&type=agent_config
                   (应用级,wx.agentConfig 用;每个应用独立)
-                  两者均通过 get_jsapi_ticket 接口带 type 参数区分,票面 TTL 7200s。
+                  票面 TTL 7200s。
 """
 import threading
 import time
@@ -61,7 +61,7 @@ class WecomTokenClient:
         return self._get_cached("_corp_ticket", self._fetch_corp_ticket)
 
     def get_app_jsapi_ticket(self) -> str:
-        """应用 jsapi_ticket(wx.agentConfig 签名用,不带 type 参数)"""
+        """应用 jsapi_ticket(wx.agentConfig 签名用,/cgi-bin/ticket/get?type=agent_config)"""
         return self._get_cached("_app_ticket", self._fetch_app_ticket)
 
     # --- 内部实现 ---
@@ -102,13 +102,13 @@ class WecomTokenClient:
         return data["access_token"], int(data.get("expires_in", 7200))
 
     def _fetch_corp_ticket(self) -> tuple[str, int]:
-        # 企业 ticket:需先取 access_token,type=consumer
+        # 企业 ticket:GET /cgi-bin/get_jsapi_ticket?access_token=(官方接口无 type 参数)
         token = self.get_access_token()
-        data = self._get("/cgi-bin/get_jsapi_ticket", {"access_token": token, "type": "consumer"})
+        data = self._get("/cgi-bin/get_jsapi_ticket", {"access_token": token})
         return data["ticket"], int(data.get("expires_in", 7200))
 
     def _fetch_app_ticket(self) -> tuple[str, int]:
-        # 应用 ticket:同一 get_jsapi_ticket 接口不带 type(区别于企业 ticket 的 type=consumer)
+        # 应用 ticket:GET /cgi-bin/ticket/get?access_token=&type=agent_config(官方独立端点)
         token = self.get_access_token()
-        data = self._get("/cgi-bin/get_jsapi_ticket", {"access_token": token})
+        data = self._get("/cgi-bin/ticket/get", {"access_token": token, "type": "agent_config"})
         return data["ticket"], int(data.get("expires_in", 7200))

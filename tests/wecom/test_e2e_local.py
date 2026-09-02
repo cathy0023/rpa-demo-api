@@ -44,9 +44,9 @@ def _wecom_handler(calls: list[httpx.Request]) -> httpx.Response:
         url = str(request.url)
         if "gettoken" in url:
             return httpx.Response(200, json={"errcode": 0, "access_token": "AT-E2E", "expires_in": 7200})
-        if "get_jsapi_ticket" in url:
-            if request.url.params.get("type") == "consumer":
-                return httpx.Response(200, json={"errcode": 0, "ticket": "CORP-TICKET-E2E", "expires_in": 7200})
+        if request.url.path.endswith("/get_jsapi_ticket"):
+            return httpx.Response(200, json={"errcode": 0, "ticket": "CORP-TICKET-E2E", "expires_in": 7200})
+        if request.url.path.endswith("/ticket/get"):
             return httpx.Response(200, json={"errcode": 0, "ticket": "APP-TICKET-E2E", "expires_in": 7200})
         if "getuserinfo" in url:
             return httpx.Response(200, json={"errcode": 0, "userid": STAFF_USERID})

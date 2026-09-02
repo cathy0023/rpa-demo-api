@@ -21,15 +21,22 @@ SECRET = "test_app_secret"
 
 
 def _ok_handler(calls: list[httpx.Request]):
-    """记录请求并按企微协议返回成功响应"""
+    """记录请求并按企微协议返回成功响应(按 URL 路径区分双 ticket 端点,官方文档口径)
+
+    - 企业 ticket: GET /cgi-bin/get_jsapi_ticket?access_token=(无 type 参数)
+    - 应用 ticket: GET /cgi-bin/ticket/get?access_token=&type=agent_config
+    """
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(request)
-        if "gettoken" in str(request.url):
+        path = request.url.path
+        if path.endswith("/gettoken"):
             return httpx.Response(200, json={"errcode": 0, "access_token": "AT-1", "expires_in": 7200})
-        if request.url.params.get("type") == "consumer":
+        if path.endswith("/get_jsapi_ticket"):
             return httpx.Response(200, json={"errcode": 0, "ticket": "CORP-TICKET-1", "expires_in": 7200})
-        return httpx.Response(200, json={"errcode": 0, "ticket": "APP-TICKET-1", "expires_in": 7200})
+        if path.endswith("/ticket/get"):
+            return httpx.Response(200, json={"errcode": 0, "ticket": "APP-TICKET-1", "expires_in": 7200})
+        return httpx.Response(200, json={"errcode": 40029, "errmsg": "unexpected endpoint"})
 
     return handler
 
@@ -55,8 +62,10 @@ def test_corp_ticket_success():
     )
     ticket = client.get_corp_jsapi_ticket()
     assert ticket == "CORP-TICKET-1"
-    req = next(r for r in calls if "get_jsapi_ticket" in str(r.url))
-    assert req.url.params["type"] == "consumer"
+    req = next(r for r in calls if r.url.path.endswith("/get_jsapi_ticket"))
+    # 企业 ticket 端点:GET /cgi-bin/get_jsapi_ticket,不带 type 参数
+    assert req.url.path == "/cgi-bin/get_jsapi_ticket"
+    assert "type" not in req.url.params
     # 企业 ticket 接口要求 access_token 查询参数
     assert req.url.params["access_token"] == "AT-1"
 
@@ -69,8 +78,11 @@ def test_app_ticket_success():
     )
     ticket = client.get_app_jsapi_ticket()
     assert ticket == "APP-TICKET-1"
-    req = next(r for r in calls if "get_jsapi_ticket" in str(r.url))
-    assert "type" not in req.url.params  # 不带 type 即应用 ticket
+    # 应用 ticket 端点:GET /cgi-bin/ticket/get?type=agent_config(官方文档口径)
+    req = next(r for r in calls if r.url.path.endswith("/ticket/get"))
+    assert req.url.path == "/cgi-bin/ticket/get"
+    assert req.url.params["type"] == "agent_config"
+    assert req.url.params["access_token"] == "AT-1"
 
 
 def test_cache_hit_no_extra_request():
@@ -83,9 +95,10 @@ def test_cache_hit_no_extra_request():
         assert client.get_access_token() == "AT-1"
         assert client.get_corp_jsapi_ticket() == "CORP-TICKET-1"
         assert client.get_app_jsapi_ticket() == "APP-TICKET-1"
-    # 各接口只发一次网络请求
-    assert len([r for r in calls if "gettoken" in str(r.url)]) == 1
-    assert len([r for r in calls if "get_jsapi_ticket" in str(r.url)]) == 2
+    # 各接口只发一次网络请求(双 ticket 按路径区分端点)
+    assert len([r for r in calls if r.url.path.endswith("/gettoken")]) == 1
+    assert len([r for r in calls if r.url.path.endswith("/get_jsapi_ticket")]) == 1
+    assert len([r for r in calls if r.url.path.endswith("/ticket/get")]) == 1
 
 
 def test_refresh_before_expiry_300s():

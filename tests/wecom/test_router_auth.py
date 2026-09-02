@@ -26,31 +26,35 @@ COOKIE_SECRET = "unit_cookie_secret"
 
 
 def _ok_token_handler(calls: list[httpx.Request]):
-    """token client 用:access_token + 双 ticket 全成功"""
+    """token client 用:access_token + 双 ticket 全成功(按 URL 路径区分端点)"""
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(request)
-        if "gettoken" in str(request.url):
+        path = request.url.path
+        if path.endswith("/gettoken"):
             return httpx.Response(200, json={"errcode": 0, "access_token": "AT-1", "expires_in": 7200})
-        if request.url.params.get("type") == "consumer":
+        if path.endswith("/get_jsapi_ticket"):
             return httpx.Response(200, json={"errcode": 0, "ticket": "CORP-TICKET-1", "expires_in": 7200})
-        return httpx.Response(200, json={"errcode": 0, "ticket": "APP-TICKET-1", "expires_in": 7200})
+        if path.endswith("/ticket/get"):
+            return httpx.Response(200, json={"errcode": 0, "ticket": "APP-TICKET-1", "expires_in": 7200})
+        return httpx.Response(200, json={"errcode": 40029, "errmsg": "unexpected endpoint"})
 
     return handler
 
 
 def _wecom_handler(calls: list[httpx.Request], login_json: dict | None = None):
-    """企微 API 统一 mock:token 三件套 + getuserinfo(可注入返回体)"""
+    """企微 API 统一 mock:token 三件套 + getuserinfo(可注入返回体);按路径区分双 ticket 端点"""
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(request)
-        if "gettoken" in str(request.url):
+        path = request.url.path
+        if path.endswith("/gettoken"):
             return httpx.Response(200, json={"errcode": 0, "access_token": "AT-1", "expires_in": 7200})
-        if "get_jsapi_ticket" in str(request.url):
-            if request.url.params.get("type") == "consumer":
-                return httpx.Response(200, json={"errcode": 0, "ticket": "CORP-TICKET-1", "expires_in": 7200})
+        if path.endswith("/get_jsapi_ticket"):
+            return httpx.Response(200, json={"errcode": 0, "ticket": "CORP-TICKET-1", "expires_in": 7200})
+        if path.endswith("/ticket/get"):
             return httpx.Response(200, json={"errcode": 0, "ticket": "APP-TICKET-1", "expires_in": 7200})
-        if "getuserinfo" in str(request.url):
+        if path.endswith("/getuserinfo"):
             body = login_json or {"errcode": 0, "userid": "zhangsan"}
             return httpx.Response(200, json=body)
         return httpx.Response(200, json={"errcode": 40029, "errmsg": "invalid code"})
@@ -90,8 +94,9 @@ def test_sign_returns_dual_signatures():
     assert len(data["config_sig"]) == 40 and len(data["agent_config_sig"]) == 40
     assert len(data["nonce_str"]) == 16
     assert abs(int(data["timestamp"]) - time.time()) < 10
-    # 双 ticket 均被取用(签名输入)
-    assert len([r for r in calls if "get_jsapi_ticket" in str(r.url)]) == 2
+    # 双 ticket 均被取用(签名输入):企业票走 get_jsapi_ticket,应用票走 ticket/get
+    assert len([r for r in calls if r.url.path.endswith("/get_jsapi_ticket")]) == 1
+    assert len([r for r in calls if r.url.path.endswith("/ticket/get")]) == 1
 
 
 def test_sign_url_not_in_trusted_domain_rejected():
