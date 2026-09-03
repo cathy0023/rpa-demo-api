@@ -212,3 +212,19 @@ CREATE TABLE IF NOT EXISTS wecom_profile_cache (
 - [JS-SDK开发企微侧边栏-掘金](https://juejin.cn/post/7550230336647544866) / [企微侧边栏本地开发调试-掘金](https://juejin.cn/post/7532773597849452579) / [企微H5的一些坑-掘金](https://juejin.cn/post/7236541021122150456) / [wecom-sidebar 文档](https://wecom-sidebar.github.io/wecom-sidebar-docs/pre_work/config_sidebar.html)
 - [PyWeWorkFinance](https://github.com/911061873/PyWeWorkFinance) / [wecom-audit(PyPI)](https://pypi.org/project/wecom-audit/) / [Python调用C库实战](https://feiyu.co/articles/Python%E8%B0%83%E7%94%A8C%E5%BA%93%E8%8E%B7%E5%8F%96%E4%BC%9A%E8%AF%9D%E5%AD%98%E6%A1%A3/) / [会话内容存档笔记](https://wener.me/notes/platform/wecom/archive)
 - 竞品：[卫瓴科技](https://www.weiling.cn/) / [纷享销客话术库](https://www.fxiaoke.com/crm/information/crm-xitong-information-3-83746.html) / [探迹企微助手](https://www.tungee.com/product/wecom/) / [句子互动](https://juzibot.com/)
+
+## 设计变更记录（2026-09-03）
+
+### 侧边栏 H5 员工身份兑换路径：wx.qy.login → OAuth2 snsapi_base
+
+- **原设计**：`wx.qy.login(code)` 拿一次性 code → 后端 `/login` 用 `getuserinfo` 兑换 userid。
+- **实测问题**：企微侧边栏 H5（聊天工具栏打开的 webview）调 `wx.qy.login` 报 `undefined is not an object (evaluating 'window.wx.qy.login')`；查官方文档与社区帖确认：该 JSAPI **仅适用于企业微信小程序**，H5 / webview 不可用。
+- **新设计**：H5 改走 **OAuth2 网页授权（scope=snsapi_base 静默授权）**。前端在 sidebar 首次加载时无 `?code=` 的情况下主动 `window.location.assign(...)` 跳 `https://open.weixin.qq.com/connect/oauth2/authorize?appid=CORPID&redirect_uri=URLENCODED(sidebarUrl)&response_type=code&scope=snsapi_base&state=&agentid=AGENTID#wechat_redirect`；企微鉴权后 302 回到 sidebar 并带上 `?code=xxx&appid=...&state=...`，前端取出 `code` 即可。
+- **后端影响**：`/login` 端点的 code 兑换逻辑（access_token + code → `/cgi-bin/auth/getuserinfo` → Set-Cookie HMAC）**不变**——OAuth2 code 与 `wx.qy.login` code 在企微服务端最终走的是同一个 `getuserinfo` 端点，语义一致。`/login` 入参结构（`{code: str}`）与响应结构（`{userid}`）均不变。仅 docstring / 错误消息 / 注释中"wx.qy.login"措辞改为"OAuth2 snsapi_base"。
+- **AC 影响**：不影响任何 AC（`/login` 行为不变；前端只是换拿 code 的方式，从 `wx.qy.login` 回调换成 OAuth2 重定向）。
+- **前端影响**：
+  - `src/sidebar/oauthUrl.mjs` 新增：`extractOAuthCode(search)`（从 URL 拿 code）+ `buildOAuthUrl(corpId, agentId, redirectUri)`（构造跳转 URL）。
+  - `src/sidebar/auth.ts`：`initWxSdk` 签名改为 `initWxSdk(code, pageUrl)`，不再调 `wx.qy.login`；`onceQyLogin` 整段删除。
+  - `src/sidebar/main.tsx`：增加 `oauth_redirecting` loading 态；首次打开无 code 时 `fetchSign` → `buildOAuthUrl` → `window.location.assign(...)`；回调后（带 `?code=`）进入 `initWxSdk`。
+  - `src/sidebar/Assistant.tsx`：`reauth` 复用 URL 上的 `code` 重跑链路；无 code 时提示"请重新打开侧边栏"。
+- **测试**：新增 `src/sidebar/oauthUrl.test.mjs`（Node 内置 `node:test`，零新增依赖），覆盖 `extractOAuthCode`（有/无/空字符串/真实回调 query）+ `buildOAuthUrl`（字段齐全 + 末尾 `#wechat_redirect` + redirect_uri 编码）。`pnpm build` 仍走原 `tsc --noEmit && vite build`。

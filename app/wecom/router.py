@@ -4,6 +4,10 @@
 除 /sign 外的端点经 get_current_staff 守卫(AC8:无/坏 cookie → HTTP 401 + 信封)。
 /history 受 WECOM_SID_ENABLED 降级开关控制(false → data:[],AC6)。
 测试注入:configure(cfg=..., token_client_factory=...);生产用全局 wecom_config 惰性单例。
+
+设计变更(2026-09-03):/login 接收的 code 来源由 wx.qy.login(小程序)
+调整为 OAuth2 snsapi_base 网页授权(H5 侧边栏);两者最终都走
+/cgi-bin/auth/getuserinfo 兑换 userid,本端点 code 兑换逻辑不变。
 """
 import asyncio
 import logging
@@ -88,7 +92,13 @@ def _domain_allowed(url: str, trusted_domain: str) -> bool:
 
 
 class LoginBody(BaseModel):
-    """wx.qy.login 返回的一次性 code"""
+    """OAuth2 snsapi_base 网页授权回调的一次性 code
+
+    侧边栏 H5 经 open.weixin.qq.com/connect/oauth2/authorize 重定向回
+    redirect_uri 时,query 携带的 code 字段。语义上不同于 wx.qy.login 的
+    code(小程序 JSAPI),但本端点对两者一视同仁——都调 getuserinfo 兑换
+    当前员工 userid。
+    """
     code: str
 
 
@@ -119,7 +129,13 @@ def sign(url: str):
 
 @router.post("/login")
 def login(body: LoginBody, response: Response):
-    """wx.qy.login code 兑换 userid 并签会话 cookie"""
+    """OAuth2 snsapi_base code 兑换 userid 并签会话 cookie
+
+    code 来源:企微侧边栏 H5 经 OAuth2 重定向回 sidebar URL 时,query
+    `?code=xxx` 携带。前端 postLogin({code}) 把这个 code 送进本端点;
+    本端点用 access_token + code 调 /cgi-bin/auth/getuserinfo 换 userid,
+    签 HMAC cookie 写回浏览器。该逻辑与历史 wx.qy.login 路径完全一致。
+    """
     cfg = _active_cfg()
     try:
         access_token = _client().get_access_token()

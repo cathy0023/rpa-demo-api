@@ -4,6 +4,11 @@
 1. GET /sign —— 成功返回 code:2000 + data 五字段;域名不在白名单报错;白名单为空放行
 2. POST /login —— mock getuserinfo 成功 Set-Cookie + code:2000;企微 errcode!=0 拒绝
 3. 401 守卫 —— 无效/缺失 cookie 访问 /profile 返回 HTTP 401 + code!=2000
+
+设计说明:本测试中 `code` 参数语义为 OAuth2 snsapi_base 网页授权
+回调的一次性 code(2026-09-03 设计变更);其与 wx.qy.login 的 code
+最终都通过 /cgi-bin/auth/getuserinfo 兑换 userid,因此端点内部
+实现一致——本套测试覆盖的是端点的 code 兑换逻辑,无需区分来源。
 """
 import sys
 import time
@@ -121,6 +126,7 @@ def test_sign_empty_trusted_domain_allows_any():
 
 
 def test_login_success_sets_cookie():
+    """OAuth2 snsapi_base 回调的 code 兑换:mock getuserinfo 返回 userid → Set-Cookie"""
     calls: list[httpx.Request] = []
     cfg = WecomConfig(corp_id=CORP_ID, app_secret=SECRET, cookie_secret=COOKIE_SECRET)
     client = _build_app(cfg, _wecom_handler(calls))
