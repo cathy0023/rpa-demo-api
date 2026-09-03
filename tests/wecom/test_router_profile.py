@@ -101,7 +101,7 @@ def test_profile_with_valid_cookie_returns_condensed_profile(conn):
     contact_reqs = [r for r in calls if "externalcontact/get" in str(r.url)]
     assert len(contact_reqs) == 1
     assert contact_reqs[0].url.params["access_token"] == "AT-1"
-    assert contact_reqs[0].url.params["userid"] == "wo_customer1"
+    assert contact_reqs[0].url.params["external_userid"] == "wo_customer1"
 
 
 def test_profile_contact_not_exist_clear_error(conn):

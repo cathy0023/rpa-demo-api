@@ -83,11 +83,11 @@ def test_fetch_profile_maps_condensed_fields(conn):
         "tags": ["高意向", "VIP"],
         "description": "意向A产品",
     }
-    # 请求参数:externalcontact/get 带 access_token 与 userid
+    # 请求参数:externalcontact/get 带 access_token 与 external_userid(官方参数名)
     assert len(calls) == 1
     assert "externalcontact/get" in str(calls[0].url)
     assert calls[0].url.params["access_token"] == "AT-1"
-    assert calls[0].url.params["userid"] == EXTERNAL_USERID
+    assert calls[0].url.params["external_userid"] == EXTERNAL_USERID
     # 成功后写入 wecom_profile_cache 表
     row = conn.execute(
         "SELECT profile_json, updated_at FROM wecom_profile_cache WHERE corp_id=? AND external_userid=?",
