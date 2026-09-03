@@ -91,6 +91,11 @@ def mount_frontend_dist(app: FastAPI, dist_dir: str | Path = "dist") -> bool:
     return True
 
 
+@app.get("/healthz")
+def healthz():
+    return {"status": "ok"}
+
+
 mount_frontend_dist(app, "dist")
 
 
@@ -102,8 +107,3 @@ from .wecom.deps import WecomAuthError, wecom_auth_error_response
 @app.exception_handler(WecomAuthError)
 async def wecom_auth_error_handler(request: Request, exc: WecomAuthError) -> JSONResponse:
     return wecom_auth_error_response(exc)
-
-
-@app.get("/healthz")
-def healthz():
-    return {"status": "ok"}
