@@ -3,7 +3,7 @@ title: WECOM-001 企微侧边栏·智能销售话术助手
 id: WECOM-001
 created: 2026-09-02
 source: inbox/2026-09-02-wechat-sidebar-sales-assistant.md
-status: Approved
+status: Completed
 ---
 
 # WECOM-001 企微侧边栏·智能销售话术助手

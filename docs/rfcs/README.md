@@ -22,7 +22,7 @@ RFC 流程：inbox（原始需求）→ draft（评审中）→ approved（批�
 - (空)
 
 ### Approved
-- WECOM-001 企微侧边栏·智能销售话术助手 — `approved/WECOM-001-wecom-sidebar-sales-assistant.md`
+
 
 ### Completed
-- （空）
+- WECOM-001 企微侧边栏·智能销售话术助手 — `completed/WECOM-001-wecom-sidebar-sales-assistant.md`
