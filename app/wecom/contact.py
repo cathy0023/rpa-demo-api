@@ -60,7 +60,8 @@ def _fetch_profile(access_token: str, userid: str, transport: httpx.BaseTranspor
         with httpx.Client(timeout=10.0, transport=transport) as http:
             resp = http.get(
                 f"{_QYAPI_BASE}/cgi-bin/externalcontact/get",
-                params={"access_token": access_token, "userid": userid},
+                # 官方参数名为 external_userid(不是 userid,写错会报 40058 missing field)
+                params={"access_token": access_token, "external_userid": userid},
             )
             resp.raise_for_status()
             data = resp.json()
